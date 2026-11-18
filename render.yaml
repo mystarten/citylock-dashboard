@@ -1,22 +1,21 @@
-# Déploiement Render. Les valeurs secrètes ne sont PAS ici : Render les demande
-# au moment de la création du service (sync: false).
+# Déploiement Render, version gratuite pour test.
+# Les valeurs secrètes ne sont PAS ici : Render les demande à la création (sync: false).
+# Sans disque : les réglages, sujets, articles et historique sont effacés à chaque redémarrage ou redéploiement.
 services:
   - type: web
     name: citylock-dashboard
     runtime: node
-    plan: starter
+    plan: free
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/session
     envVars:
       - key: NODE_VERSION
         value: "22"
-      - key: DATA_DIR
-        value: /var/data
       - key: WP_BASE_URL
         value: https://citylock.fr
       - key: SIMULATE
-        value: "false"
+        value: "true"
       - key: DASHBOARD_USER
         sync: false
       - key: DASHBOARD_PASSWORD
@@ -33,7 +32,3 @@ services:
         sync: false
       - key: PAGESPEED_API_KEY
         sync: false
-    disk:
-      name: citylock-data
-      mountPath: /var/data
-      sizeGB: 1
