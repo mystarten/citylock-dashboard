@@ -1,0 +1,39 @@
+# Déploiement Render. Les valeurs secrètes ne sont PAS ici : Render les demande
+# au moment de la création du service (sync: false).
+services:
+  - type: web
+    name: citylock-dashboard
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/session
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATA_DIR
+        value: /var/data
+      - key: WP_BASE_URL
+        value: https://citylock.fr
+      - key: SIMULATE
+        value: "false"
+      - key: DASHBOARD_USER
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        sync: false
+      - key: WP_USER
+        sync: false
+      - key: WP_APP_PASSWORD
+        sync: false
+      - key: PAGESPEED_API_KEY
+        sync: false
+    disk:
+      name: citylock-data
+      mountPath: /var/data
+      sizeGB: 1

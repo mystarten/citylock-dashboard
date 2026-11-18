@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>CITYLOCK, tableau de bord</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-in">
+      <span class="brand">CITYLOCK</span>
+      <button id="logout" class="link hidden" type="button">Se déconnecter</button>
+    </div>
+    <nav id="tabs" class="wrap tabs hidden" aria-label="Sections">
+      <button type="button" data-tab="settings" class="active">Réglages</button>
+      <button type="button" data-tab="articles">Articles</button>
+      <button type="button" data-tab="score">Score SEO</button>
+      <button type="button" data-tab="help">Aide</button>
+    </nav>
+  </header>
+  <div id="sim" class="sim hidden">Mode simulation : aucun appel à OpenRouter ni à WordPress.</div>
+
+  <main class="wrap">
+    <div id="toast" class="toast hidden" role="status"></div>
+
+    <section id="login" class="card narrow hidden">
+      <h1>Connexion</h1>
+      <form id="login-form">
+        <label for="user">Identifiant</label>
+        <input id="user" type="text" autocomplete="username" required>
+        <label for="pw">Mot de passe</label>
+        <input id="pw" type="password" autocomplete="current-password" required>
+        <label class="check"><input id="remember" type="checkbox" checked> Se souvenir de moi sur cet appareil (30 jours)</label>
+        <button class="btn" type="submit">Se connecter</button>
+      </form>
+    </section>
+
+    <section id="tab-settings" class="tab">
+      <h1>Réglages et fréquence</h1>
+      <div class="card">
+        <h2>Fréquence de publication</h2>
+        <label for="freq">Articles par mois : <strong id="freq-val">2</strong></label>
+        <input id="freq" type="range" min="1" max="8" step="1" value="2">
+        <div class="scale"><span>1</span><span>8</span></div>
+      </div>
+      <div class="card">
+        <h2>Entreprise</h2>
+        <label for="brand">Nom commercial</label>
+        <input id="brand" type="text" maxlength="60">
+        <label for="zone">Zone desservie</label>
+        <input id="zone" type="text" maxlength="80">
+        <button id="save-settings" class="btn" type="button">Enregistrer les réglages</button>
+      </div>
+      <div class="card">
+        <h2>Sujets validés</h2>
+        <p class="muted">Un sujet = un mot-clé principal, avec une ville si besoin.</p>
+        <form id="topic-form" class="row">
+          <input id="t-kw" type="text" maxlength="100" placeholder="Mot-clé (ex. alarme sans abonnement)" required>
+          <input id="t-city" type="text" maxlength="60" placeholder="Ville (facultatif)">
+          <button class="btn" type="submit">Ajouter</button>
+        </form>
+        <ul id="topics" class="list"></ul>
+      </div>
+      <div class="card">
+        <h2>Catégorie WordPress « Blog »</h2>
+        <p class="muted">Créée automatiquement au premier envoi. Vous pouvez la vérifier ici.</p>
+        <button id="ensure-cat" class="btn secondary" type="button">Vérifier / créer la catégorie</button>
+        <span id="cat-result" class="muted"></span>
+      </div>
+    </section>
+
+    <section id="tab-articles" class="tab hidden">
+      <h1>Rédaction d'articles</h1>
+      <div class="card">
+        <p id="batch-info" class="muted"></p>
+        <button id="gen-batch" class="btn" type="button">Générer le lot du mois</button>
+        <p id="batch-status" class="muted"></p>
+      </div>
+      <div id="articles"></div>
+    </section>
+
+    <section id="tab-score" class="tab hidden">
+      <h1>Score SEO hebdomadaire</h1>
+      <p class="notice">Score calculé selon les critères ci-dessous, il ne s'agit pas d'une note Google.</p>
+      <div class="card score-card">
+        <div class="score-big"><span id="score-num">--</span><small>/ 100</small></div>
+        <div>
+          <p id="score-meta" class="muted">Aucun audit pour l'instant.</p>
+          <button id="run-audit" class="btn" type="button">Relancer l'audit</button>
+          <p id="audit-status" class="muted"></p>
+        </div>
+      </div>
+      <div class="card"><h2>Les 5 améliorations les plus rentables</h2><ol id="improvements" class="plain"></ol></div>
+      <div class="card"><h2>Historique</h2><div id="chart"></div><table id="history" class="table"></table></div>
+      <div class="card"><h2>Détail des critères</h2><div id="criteria"></div></div>
+    </section>
+
+    <section id="tab-help" class="tab hidden">
+      <h1>Aide</h1>
+      <div class="card prose">
+        <h2>À quoi sert ce tableau de bord ?</h2>
+        <p>Il sert à préparer des articles de blog pour le site, et à suivre une note de santé du site chaque semaine. Rien n'est publié sans votre accord.</p>
+        <h2>Choisir la fréquence</h2>
+        <p>Dans « Réglages », déplacez le curseur : c'est le nombre d'articles par mois (de 1 à 8). Ajoutez ensuite les sujets que vous validez. Dans « Articles », le bouton « Générer le lot du mois » rédige au maximum ce nombre d'articles, un par sujet.</p>
+        <h2>Relire et envoyer un brouillon</h2>
+        <p>Ouvrez un article : lisez le texte et la liste « Faits à vérifier ». Chaque marqueur [SOURCE A VERIFIER] doit être remplacé par une vraie source, ou supprimé. Cliquez ensuite sur « Envoyer en brouillon WordPress » : l'article apparaît dans WordPress, non visible du public. Quand tout est bon, cochez « J'ai relu et validé » puis cliquez sur « Publier ».</p>
+        <p>Les meta titre et description sont affichés ici pour que vous les copiez dans votre extension SEO WordPress. Ils ne sont pas envoyés automatiquement.</p>
+        <h2>Ce que mesure le score</h2>
+        <p>Le score sur 100 est calculé à partir de critères précis, visibles dans l'écran « Score SEO » : titres, descriptions, titres principaux (H1), textes alternatifs des images, données structurées de l'entreprise, liens cassés, pages isolées, pages trop courtes, plan du site, pages de démonstration et vitesse mobile.</p>
+        <h2>Ce qu'il ne mesure pas</h2>
+        <p>Ce n'est pas une note Google. Il ne mesure ni votre position dans les résultats, ni le nombre de visiteurs, ni la qualité des textes, ni les liens venant d'autres sites. Un bon score ne garantit aucun classement.</p>
+        <h2>En cas de problème</h2>
+        <p id="help-contact">Contactez la personne qui a installé cet outil.</p>
+      </div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
