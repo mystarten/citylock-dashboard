@@ -54,6 +54,10 @@ test('client WordPress réel contre faux WP : catégorie, brouillon, publication
     const p2 = await wp.createDraft({ title: 'T2', htmlContent: '<p>x</p>', slug: 't2', metaDescription: 'd' }, cat);
     await wp.deleteDraft(p2.id);
     assert.ok(!fake.wpPosts.has(p2.id));
+    const me = await wp.testConnection();
+    assert.deepStrictEqual([me.name, me.canEdit, me.canPublish], ['Laurent', true, true]);
+    const p3 = await wp.createDraft({ title: 'T3', htmlContent: '<p>Chiffre [SOURCE A VERIFIER]</p>', slug: 't3', metaDescription: 'd' }, cat);
+    assert.ok((await wp.getContent(p3.id)).includes('[SOURCE A VERIFIER]'));
     process.env.WP_APP_PASSWORD = 'mauvais';
     await assert.rejects(() => wp.ensureBlogCategory(), /401/);
   } finally { Object.assign(process.env, saved); s.close(); }
@@ -80,7 +84,8 @@ test('API : auth, validation, lot simulé, brouillon, publication, suppression',
     assert.strictEqual((await call('PUT', '/api/settings', { frequency: 9, zone: 'a', brandName: 'b' })).status, 400);
     assert.strictEqual((await call('PUT', '/api/settings', { frequency: 'x', zone: 'a', brandName: 'b' })).status, 400);
     assert.strictEqual((await call('PUT', '/api/settings', { frequency: 2, zone: '', brandName: 'b' })).status, 400);
-    assert.strictEqual((await call('PUT', '/api/settings', { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK' })).status, 200);
+    assert.strictEqual((await call('PUT', '/api/settings', { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', autoDraft: false })).status, 200);
+    assert.strictEqual((await call('PUT', '/api/settings', { frequency: 2, zone: 'a', brandName: 'b', autoDraft: 'oui' })).status, 400);
 
     assert.strictEqual((await call('POST', '/api/topics', { keyword: '  ' })).status, 400);
     for (const kw of ['alarme sans abonnement', 'alarme Ajax', 'installation alarme']) assert.strictEqual((await call('POST', '/api/topics', { keyword: kw, city: 'Chatou' })).status, 201);
@@ -104,6 +109,15 @@ test('API : auth, validation, lot simulé, brouillon, publication, suppression',
     assert.strictEqual((await call('DELETE', `/api/articles/${a.id}`)).status, 409); // publié : suppression refusée
     assert.strictEqual((await call('DELETE', `/api/articles/${list[1].id}`)).status, 200);
     assert.strictEqual((await call('GET', '/api/articles')).json.length, 1);
+
+    // Envoi automatique en brouillon : le nouvel article arrive directement au statut brouillon WordPress
+    assert.strictEqual((await call('PUT', '/api/settings', { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', autoDraft: true })).status, 200);
+    assert.strictEqual((await call('POST', '/api/articles/batch')).status, 202);
+    for (let i = 0; i < 50; i++) { if (!(await call('GET', '/api/articles/batch/status')).json.running) break; await new Promise((r) => setTimeout(r, 100)); }
+    list = (await call('GET', '/api/articles')).json;
+    assert.strictEqual(list.length, 2);
+    assert.ok(list.some((x) => x.status === 'brouillon_wp' && x.wpId), 'autoDraft : brouillon attendu');
+    assert.strictEqual((await call('GET', '/api/wp/test')).json.ok, true);
 
     // Aucun secret dans le front
     for (const f of ['index.html', 'app.js']) {

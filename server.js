@@ -80,8 +80,10 @@ app.put('/api/settings', wrap((req, res) => {
   const zone = clean(b.zone, 80);
   const brandName = clean(b.brandName, 60);
   if (!zone || !brandName) throw fail(400, 'La zone desservie et le nom commercial sont obligatoires.');
+  if (b.autoDraft !== undefined && typeof b.autoDraft !== 'boolean') throw fail(400, 'Réglage invalide.');
   const s = store.getSettings();
   Object.assign(s, { frequency: freq, zone, brandName });
+  if (typeof b.autoDraft === 'boolean') s.autoDraft = b.autoDraft;
   store.saveSettings(s);
   res.json(s);
 }));
@@ -105,6 +107,8 @@ app.delete('/api/topics/:id', wrap((req, res) => {
   res.json(s);
 }));
 
+app.get('/api/wp/test', wrap(async (req, res) => res.json(await wp.testConnection())));
+
 app.post('/api/category/ensure', wrap(async (req, res) => {
   const id = await wp.ensureBlogCategory();
   const s = store.getSettings();
@@ -117,6 +121,14 @@ app.post('/api/category/ensure', wrap(async (req, res) => {
 const monthNow = () => new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7);
 const batch = { running: false, total: 0, done: 0, errors: [] };
 const articleView = (a) => a;
+async function pushDraft(a) {
+  const s = store.getSettings();
+  let cat = s.blogCategoryId;
+  if (!cat) { cat = await wp.ensureBlogCategory(); s.blogCategoryId = cat; store.saveSettings(s); }
+  const post = await wp.createDraft(a, cat);
+  Object.assign(a, { status: 'brouillon_wp', wpId: post.id, wpLink: post.link });
+}
+const wpReady = () => process.env.SIMULATE === 'true' || !!(process.env.WP_BASE_URL && process.env.WP_USER && process.env.WP_APP_PASSWORD);
 const findArticle = (id) => {
   const list = store.getArticles();
   const a = list.find((x) => x.id === id);
@@ -149,12 +161,19 @@ app.post('/api/articles/batch', wrap((req, res) => {
     for (const topic of todo) {
       try {
         const art = await ai.generateArticle(topic, s, pages);
-        const list = store.getArticles();
-        list.push({
+        const rec = {
           id: crypto.randomUUID(), topicId: topic.id, keyword: topic.keyword, city: topic.city, month,
           createdAt: new Date().toISOString(), status: 'a_relire', wpId: null, wpLink: null,
           simulated: process.env.SIMULATE === 'true', ...art,
-        });
+        };
+        if (s.autoDraft && wpReady()) {
+          try { await pushDraft(rec); } catch (e) {
+            log.error(`Envoi automatique en brouillon échoué pour « ${topic.keyword} »`, e);
+            batch.errors.push(`${topic.keyword} : rédigé, mais l'envoi dans WordPress a échoué (${e.message}). Vous pouvez le renvoyer à la main.`);
+          }
+        }
+        const list = store.getArticles();
+        list.push(rec);
         store.saveArticles(list);
       } catch (e) {
         log.error(`Génération échouée pour « ${topic.keyword} »`, e);
@@ -171,11 +190,7 @@ app.get('/api/articles/batch/status', (req, res) => res.json(batch));
 app.post('/api/articles/:id/send', wrap(async (req, res) => {
   const { list, a } = findArticle(req.params.id);
   if (a.status !== 'a_relire') throw fail(409, 'Cet article a déjà été envoyé à WordPress.');
-  const s = store.getSettings();
-  let cat = s.blogCategoryId;
-  if (!cat) { cat = await wp.ensureBlogCategory(); s.blogCategoryId = cat; store.saveSettings(s); }
-  const post = await wp.createDraft(a, cat);
-  Object.assign(a, { status: 'brouillon_wp', wpId: post.id, wpLink: post.link, validated: false });
+  await pushDraft(a);
   store.saveArticles(list);
   res.json(a);
 }));
@@ -184,6 +199,11 @@ app.post('/api/articles/:id/publish', wrap(async (req, res) => {
   const { list, a } = findArticle(req.params.id);
   if (!req.body || req.body.validated !== true) throw fail(400, 'Vous devez confirmer « J\'ai relu et validé ».');
   if (a.status !== 'brouillon_wp') throw fail(409, 'Envoyez d\'abord l\'article en brouillon WordPress.');
+  // Garde-fou : on relit le texte réellement présent dans WordPress (il a pu être corrigé là-bas).
+  if (process.env.SIMULATE !== 'true') {
+    const live = await wp.getContent(a.wpId);
+    if (live.includes('[SOURCE A VERIFIER]')) throw fail(409, 'Le texte contient encore « [SOURCE A VERIFIER] ». Remplacez ce marqueur par une vraie source (ou supprimez la phrase) dans WordPress, puis réessayez.');
+  }
   const r = await wp.publish(a.wpId);
   Object.assign(a, { status: 'publie', wpLink: r.link || a.wpLink, publishedAt: new Date().toISOString() });
   store.saveArticles(list);

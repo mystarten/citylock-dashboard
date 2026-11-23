@@ -66,9 +66,21 @@ Le service doit tourner en une seule instance (les données sont dans des fichie
 
 Si la section est absente : le site doit être en HTTPS, et une extension de sécurité peut désactiver l'API REST ou ces mots de passe.
 
+## Relier l'outil à WordPress (envoi automatique en brouillon)
+
+1. Un administrateur crée le mot de passe d'application (section précédente).
+2. Dans Render, service > Environment, renseigner `WP_USER` et `WP_APP_PASSWORD`, et passer `SIMULATE` à `false` (ou supprimer la variable).
+3. Renseigner aussi `OPENROUTER_API_KEY` et `OPENROUTER_MODEL`. Enregistrer : Render redéploie.
+4. Dans l'outil, Réglages > Connexions > « Tester la connexion ». Le message doit indiquer « Connecté en tant que ... » et « Création de brouillons : oui ».
+5. Réglages > Publication : l'envoi automatique en brouillon est activé par défaut. Chaque article rédigé arrive alors dans WordPress au statut brouillon, dans la catégorie « Blog » (créée si besoin).
+
+**La publication reste manuelle, volontairement** : un texte rédigé par IA peut contenir des chiffres non vérifiés. Le bouton « Publier » exige la case « J'ai relu et validé ». De plus, le serveur relit le texte réellement présent dans WordPress et refuse de publier s'il contient encore le marqueur `[SOURCE A VERIFIER]`.
+
+Pannes fréquentes : l'API REST désactivée par une extension de sécurité, un pare-feu qui bloque l'hébergeur, un site sans HTTPS, ou un utilisateur WordPress sans le droit de créer des articles (prendre le rôle Éditeur).
+
 ## Choix faits (points ambigus)
 
-- **Génération puis envoi** : « Générer le lot » crée les articles dans le tableau de bord (statut « À relire »). Rien n'est envoyé à WordPress avant le clic sur « Envoyer en brouillon WordPress ». WordPress ne reçoit qu'un brouillon ; la publication exige la case « J'ai relu et validé ».
+- **Génération puis envoi** : si l'envoi automatique est activé (par défaut), chaque article rédigé est envoyé à WordPress en brouillon. Sinon, il reste « À relire » jusqu'au clic sur « Envoyer en brouillon ». Dans tous les cas, la publication exige la case « J'ai relu et validé ».
 - **Lot** : au plus `fréquence − articles déjà rédigés ce mois-ci` articles, un par sujet pas encore traité ce mois-ci. Un deuxième clic ne relance donc pas d'appels inutiles.
 - **Fichier supplémentaire** : `data/articles.json` (articles en relecture), en plus de `settings.json` et `audits.json`.
 - **Meta titre et meta description** : affichés dans l'écran de relecture, non envoyés à WordPress (le champ dépend de l'extension SEO). La meta description est mise dans l'extrait de l'article. À copier à la main dans Yoast / Rank Math.
@@ -103,7 +115,7 @@ Vérifié (`npm test` et essais manuels) :
 - Audit complet (sitemap, crawl, liens cassés, orphelines, robots.txt) contre un **faux site local**.
 - Client WordPress contre un **faux serveur WordPress local** (authentification Basic, catégorie Blog sans doublon, brouillon, publication, refus de supprimer un article publié).
 - API : connexion, validation, plafond du lot, parcours simulé génération, brouillon, publication, suppression.
-- Interface dans Chromium en largeur téléphone : connexion, réglages, lot simulé, relecture, bouton Publier verrouillé tant que la case n'est pas cochée, écran Score, aucun défilement horizontal ni erreur JavaScript.
+- Interface dans Chromium (bureau et téléphone) : connexion, mauvais mot de passe, réglages, lot simulé avec envoi automatique en brouillon, relecture, bouton Publier verrouillé tant que la case n'est pas cochée, écran Score, aucun défilement horizontal ni erreur JavaScript.
 
 **Non vérifié** (aucun accès à ces services depuis l'environnement de développement) :
 - Appels réels à OpenRouter : format de réponse JSON, respect des règles de rédaction par le modèle choisi, longueur 600 à 900 mots. Relisez les premiers articles avec soin.
