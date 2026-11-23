@@ -32,16 +32,16 @@ npm test
 | `DASHBOARD_USER` | oui | Identifiant de connexion (choisi par vous) |
 | `DASHBOARD_PASSWORD` | oui | Mot de passe de connexion |
 | `SESSION_SECRET` | oui | Signe le cookie de session (32 caractères aléatoires : `openssl rand -hex 32`) |
-| `OPENROUTER_API_KEY` | pour rédiger | Clé OpenRouter (secrète, uniquement dans l'hébergeur) |
+| `OPENROUTER_API_KEY` | non | Clé OpenRouter de secours. Elle se saisit plutôt dans Réglages, Rédaction |
 | `OPENROUTER_MODEL` | non | Modèle par défaut. Il se change ensuite dans Réglages, Rédaction automatique, sans redéployer |
-| `WP_BASE_URL` | oui | `https://citylock.fr` |
-| `WP_USER`, `WP_APP_PASSWORD` | pour WordPress | Identifiant et mot de passe d'application |
-| `PAGESPEED_API_KEY` | non | Sans elle, le critère vitesse est « non mesuré » |
+| `WP_BASE_URL` | oui | `https://citylock.fr`. Fixée sur le serveur : volontairement non modifiable depuis l'interface (voir Sécurité) |
+| `WP_USER`, `WP_APP_PASSWORD` | non | Identifiant et mot de passe d'application de secours. Ils se saisissent plutôt dans Réglages, Connexions |
+| `PAGESPEED_API_KEY` | non | De secours. Sans clé, le critère vitesse est « non mesuré » |
 | `SUPPORT_CONTACT` | non | Contact affiché dans l'aide |
-| `SIMULATE` | non | `true` : simule OpenRouter et WordPress |
+| `SIMULATE` | non | `true` : mode démonstration au démarrage. Se change ensuite dans Réglages, Connexions |
 | `PORT`, `DATA_DIR` | non | Port (3000) et dossier de données (`./data`) |
 
-Identifiant et mot de passe ne sont jamais dans le code : ils se saisissent dans l'hébergeur (onglet Environment), ou dans `.env` en local. Aucune clé n'est envoyée au navigateur. Les journaux masquent les valeurs secrètes. `.env` et `data/` sont exclus de git.
+Identifiant et mot de passe de connexion ne sont jamais dans le code : ils se saisissent dans l'hébergeur (onglet Environment), ou dans `.env` en local. Aucune clé n'est envoyée au navigateur. Les journaux masquent les valeurs secrètes. `.env` et `data/` sont exclus de git.
 
 ## Déploiement sur Render
 
@@ -67,26 +67,38 @@ Le service doit tourner en une seule instance (les données sont dans des fichie
 
 Si la section est absente : le site doit être en HTTPS, et une extension de sécurité peut désactiver l'API REST ou ces mots de passe.
 
-## Relier l'outil à WordPress (envoi automatique en brouillon)
+## Clés et liaison WordPress, depuis les Réglages
 
-1. Un administrateur crée le mot de passe d'application (section précédente).
-2. Dans Render, service > Environment, renseigner `WP_USER` et `WP_APP_PASSWORD`, et passer `SIMULATE` à `false` (ou supprimer la variable).
-3. Renseigner aussi `OPENROUTER_API_KEY` et `OPENROUTER_MODEL`. Enregistrer : Render redéploie.
-4. Dans l'outil, Réglages > Connexions > « Tester la connexion ». Le message doit indiquer « Connecté en tant que ... » et « Création de brouillons : oui ».
-5. Réglages > Publication : l'envoi automatique en brouillon est activé par défaut. Chaque article rédigé arrive alors dans WordPress au statut brouillon, dans la catégorie « Blog » (créée si besoin).
+Tout se gère dans **Réglages**, sans redéployer :
 
-**La publication reste manuelle, volontairement** : un texte rédigé par IA peut contenir des chiffres non vérifiés. Le bouton « Publier » exige la case « J'ai relu et validé ». De plus, le serveur relit le texte réellement présent dans WordPress et refuse de publier s'il contient encore le marqueur `[SOURCE A VERIFIER]`.
+- **Connexions** : carte « Mise en route » (4 points à valider), mode démonstration, liaison WordPress (identifiant + mot de passe d'application, bouton « Enregistrer et tester »), clé PageSpeed.
+- **Rédaction** : clé OpenRouter, modèle, consignes.
 
-Pannes fréquentes : l'API REST désactivée par une extension de sécurité, un pare-feu qui bloque l'hébergeur, un site sans HTTPS, ou un utilisateur WordPress sans le droit de créer des articles (prendre le rôle Éditeur).
+**Mettre en place WordPress (une fois) :**
+1. Un administrateur crée le mot de passe d'application (section suivante).
+2. Réglages > Connexions > Liaison avec WordPress : coller l'identifiant et le mot de passe, puis « Enregistrer et tester ». Le message doit dire « Connexion réussie ... Créer des brouillons : oui ». Les erreurs sont expliquées (identifiant incorrect, site injoignable, API bloquée, droits insuffisants).
+3. Réglages > Rédaction : coller la clé OpenRouter, choisir le modèle, « Enregistrer et tester ».
+4. Réglages > Connexions : désactiver le mode démonstration (une confirmation est demandée).
+5. Réglages > Général : l'envoi automatique en brouillon est activé par défaut. Chaque article rédigé arrive dans WordPress au statut brouillon, catégorie « Blog » (créée si besoin).
+
+**La publication reste manuelle, volontairement** : un texte rédigé par IA peut contenir des chiffres non vérifiés. Le bouton « Publier » exige la case « J'ai relu et validé », et le serveur refuse de publier tant que le marqueur `[SOURCE A VERIFIER]` reste dans le texte sur WordPress.
+
+**Comment les clés saisies dans l'interface sont protégées :**
+- Chiffrées sur le serveur (AES-256-GCM, clé dérivée de `SESSION_SECRET`), jamais renvoyées au navigateur : on peut les remplacer ou les effacer, jamais les relire (seuls les 4 derniers caractères de la clé OpenRouter sont rappelés).
+- Masquées dans les journaux.
+- Une valeur saisie dans l'interface prend le pas sur la variable d'environnement ; en l'effaçant, on revient à la variable.
+- Si `SESSION_SECRET` change, les clés saisies dans l'interface deviennent illisibles : il faut les ressaisir.
+- L'adresse du site WordPress (`WP_BASE_URL`) reste fixée côté serveur et doit être en HTTPS. Sinon, quelqu'un qui se connecte au tableau de bord pourrait la rediriger vers un site à lui et récupérer le mot de passe WordPress.
+- **Limite importante** : toute personne qui se connecte au tableau de bord peut remplacer ces clés. Le mot de passe de connexion doit donc être long, et ne se partage qu'avec les personnes de confiance.
+- **Hébergement gratuit sans disque** : les clés et réglages saisis dans l'interface sont effacés à chaque redémarrage. Gardez aussi les clés dans les variables de l'hébergeur (elles servent de secours) ou prenez un disque persistant.
 
 ## Modèle et consignes modifiables depuis l'interface
 
-Dans Réglages, carte « Rédaction automatique » :
+Dans Réglages, onglet « Rédaction » :
 - **Modèle OpenRouter** : identifiant à copier depuis openrouter.ai/models. Vide = celui de la variable `OPENROUTER_MODEL`.
 - **Consignes de rédaction** : le prompt système, modifiable (6000 caractères maximum). « Rétablir le texte d'origine » le remet comme au départ.
 - **Tester le modèle** : un appel de quelques mots pour vérifier la clé et l'identifiant avant de lancer un lot.
 - Le **format de réponse JSON** est toujours ajouté par le code et n'est pas modifiable : le serveur en a besoin pour lire l'article. Si vous supprimez les règles « pas de chiffres inventés » ou « pas de promesse de classement », elles ne sont plus imposées au modèle (le serveur signale seulement les prix et pourcentages dans les remarques de relecture).
-- La clé OpenRouter, elle, ne se saisit jamais dans l'interface.
 - Sur l'hébergement gratuit sans disque, ces réglages sont effacés à un redémarrage et on revient au texte d'origine et au modèle de `OPENROUTER_MODEL`.
 
 ## Choix faits (points ambigus)

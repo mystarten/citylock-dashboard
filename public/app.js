@@ -134,6 +134,7 @@
 
     let next;
     if (!s.topics.length) next = ['Commencez par choisir vos sujets', 'Indiquez les thèmes dont vous voulez parler, par exemple « alarme sans abonnement » à Chatou.', 'Ajouter des sujets', () => go('settings')];
+    else if (!S.status.simulate && (!S.status.wordpress || !S.status.openrouter)) next = ['Terminez la mise en route', 'Il manque la liaison avec WordPress ou la clé de rédaction pour travailler en mode réel.', 'Ouvrir les connexions', () => { S.settingsTab = 'connexions'; go('settings'); }];
     else if (toReview) next = [`${toReview} ${plural(toReview, 'article attend', 'articles attendent')} votre relecture`, 'Lisez le texte, vérifiez les chiffres signalés, puis envoyez-le sur votre site.', 'Relire maintenant', () => go('articles')];
     else if (drafts) next = [`${drafts} ${plural(drafts, 'brouillon est prêt', 'brouillons sont prêts')} sur votre site`, 'Ils ne sont pas visibles du public. Relisez-les, puis publiez-les.', 'Voir les brouillons', () => go('articles')];
     else if (used < s.frequency && freeTopics) next = ['Rédigez les articles du mois', `Il reste ${Math.min(s.frequency - used, freeTopics)} ${plural(Math.min(s.frequency - used, freeTopics), 'article', 'articles')} à préparer ce mois-ci.`, 'Rédiger maintenant', () => { go('articles'); startBatch(); }];
@@ -395,14 +396,44 @@
   async function saveSettings(patch, msg) {
     const s = { ...S.settings, ...patch };
     const payload = { frequency: Number(s.frequency), brandName: s.brandName, zone: s.zone, autoDraft: s.autoDraft };
-    if ('aiModel' in patch) payload.aiModel = patch.aiModel;
-    if ('systemPrompt' in patch) payload.systemPrompt = patch.systemPrompt;
+    for (const k of ['aiModel', 'systemPrompt', 'simulate']) if (k in patch) payload[k] = patch[k];
     S.settings = await api('/settings', 'PUT', payload);
+    S.status = await api('/status');
     if (msg) toast(msg);
+  }
+  // Clés et identifiants : on peut les remplacer ou les effacer, jamais les relire.
+  async function saveSecrets(body, msg) {
+    S.settings = await api('/secrets', 'PUT', body);
+    S.status = await api('/status');
+    if (msg) toast(msg);
+  }
+  S.settingsTab = 'general';
+  S.msgs = {};
+  const setMsg = (k, tone, text) => { S.msgs[k] = { tone, text }; };
+  const msgBox = (k) => (S.msgs[k] ? el('div', { class: 'alert mt' + (S.msgs[k].tone === 'ok' ? ' ok' : '') }, S.msgs[k].text) : null);
+
+  function secretState(st) {
+    if (st.unreadable) return el('span', { class: 'pill ko' }, 'Illisible, à ressaisir');
+    if (st.source === 'interface') return el('span', { class: 'pill ok' }, icon('check'), 'Enregistrée');
+    if (st.source === 'serveur') return el('span', { class: 'pill ok' }, icon('check'), 'Fournie par le serveur');
+    return el('span', { class: 'pill ko' }, 'Non renseignée');
+  }
+  const secretInput = (id, st, empty) => el('input', { type: 'password', id, autocomplete: 'new-password', spellcheck: 'false', placeholder: st.set ? '•••••••• enregistrée (vide = inchangée)' : empty });
+
+  function tabsBar() {
+    const items = [['general', 'Général'], ['connexions', 'Connexions'], ['ia', 'Rédaction']];
+    return el('div', { class: 'seg', role: 'tablist' }, items.map(([id, label]) => el('button', { type: 'button', role: 'tab', class: S.settingsTab === id ? 'on' : '', 'aria-selected': S.settingsTab === id ? 'true' : 'false', onclick: () => { S.settingsTab = id; render(); } }, label)));
   }
 
   function viewSettings() {
-    const s = S.settings, st = S.status;
+    const t = S.settingsTab;
+    return [head('Réglages', 'Tout se gère ici : le rythme, les sujets, la liaison avec votre site et la rédaction.'), tabsBar(),
+      ...(t === 'connexions' ? settingsConnexions() : t === 'ia' ? settingsIa() : settingsGeneral())];
+  }
+
+  // ----- Général : rythme, sujets, publication, entreprise -----
+  function settingsGeneral() {
+    const s = S.settings;
     const freq = el('input', { type: 'range', min: 1, max: 8, step: 1, value: s.frequency, 'aria-label': 'Articles par mois' });
     const big = el('div', { class: 'freq-val' }, s.frequency, el('small', {}, plural(s.frequency, 'article par mois', 'articles par mois')));
     const hint = el('p', { class: 'muted small' }, freqHint(s.frequency));
@@ -413,60 +444,15 @@
     const city = el('input', { type: 'text', maxlength: 60, placeholder: 'Ville (facultatif)', 'aria-label': 'Ville' });
     const topics = el('div', { class: 'chips' });
     if (!s.topics.length) topics.append(el('p', { class: 'muted' }, 'Aucun sujet pour l\'instant.'));
-    s.topics.forEach((t) => topics.append(el('div', { class: 'chip' }, el('div', { class: 'grow' }, el('b', {}, t.keyword), t.city ? ' à ' + t.city : ''),
-      el('button', { type: 'button', 'aria-label': 'Supprimer ce sujet', onclick: safe(async () => { S.settings = await api('/topics/' + t.id, 'DELETE'); render(); }) }, icon('trash')))));
+    s.topics.forEach((tp) => topics.append(el('div', { class: 'chip' }, el('div', { class: 'grow' }, el('b', {}, tp.keyword), tp.city ? ' à ' + tp.city : ''),
+      el('button', { type: 'button', 'aria-label': 'Supprimer ce sujet', onclick: safe(async () => { S.settings = await api('/topics/' + tp.id, 'DELETE'); render(); }) }, icon('trash')))));
 
     const brand = el('input', { type: 'text', maxlength: 60, value: s.brandName, id: 'brand' });
     const zone = el('input', { type: 'text', maxlength: 80, value: s.zone, id: 'zone' });
-
     const auto = el('input', { type: 'checkbox', checked: s.autoDraft ? true : false, id: 'auto', role: 'switch' });
     auto.addEventListener('change', safe(async () => { await saveSettings({ autoDraft: auto.checked }, auto.checked ? 'Envoi automatique activé.' : 'Envoi automatique désactivé.'); }));
 
-
-    // Rédaction automatique : modèle et consignes modifiables
-    const D = S.aiDefaults;
-    const rules = el('textarea', { id: 'rules', rows: 16, maxlength: D.maxLength, 'aria-label': 'Consignes de rédaction' });
-    rules.value = s.systemPrompt || D.systemPrompt;
-    const rulesCount = el('div', { class: 'count muted' });
-    const updCount = () => { rulesCount.textContent = `${rules.value.length} caractères sur ${D.maxLength}` + (rules.value.trim() === D.systemPrompt.trim() ? ' · texte d\'origine' : ' · texte personnalisé'); };
-    rules.addEventListener('input', updCount); updCount();
-    const model = el('input', { type: 'text', id: 'model', maxlength: 99, value: s.aiModel || '', placeholder: D.envModel ? 'Par défaut : ' + D.envModel : 'Exemple : anthropic/claude-haiku-5-5', autocomplete: 'off', spellcheck: 'false' });
-    const usedModel = s.aiModel || D.envModel;
-    const aiMsg = el('p', { class: 'muted small', id: 'ai-msg' });
-    const saveAi = async () => {
-      const text = rules.value.trim() === D.systemPrompt.trim() ? '' : rules.value;
-      await saveSettings({ aiModel: model.value, systemPrompt: text });
-    };
-    const aiCard = el('div', { class: 'card' }, el('h2', {}, 'Rédaction automatique'),
-      el('p', { class: 'muted' }, 'Choisissez le modèle d\'intelligence artificielle et les consignes qu\'il doit suivre pour écrire vos articles.'),
-      el('label', { for: 'model' }, 'Modèle OpenRouter'), model,
-      el('p', { class: 'muted small' }, usedModel ? `Modèle utilisé aujourd'hui : ${usedModel}${s.aiModel ? '' : ' (celui du serveur)'}.` : 'Aucun modèle choisi pour l\'instant.'),
-      el('p', { class: 'muted small' }, 'Copiez l\'identifiant exact depuis openrouter.ai/models, par exemple anthropic/claude-haiku-5-5. Laissez vide pour utiliser celui du serveur.'),
-      el('label', { for: 'rules' }, 'Consignes de rédaction'), rules, rulesCount,
-      el('div', { class: 'alert mt' }, 'Gardez les règles 2 et 3 (ne jamais inventer de chiffres, ne jamais promettre un classement) : elles évitent d\'afficher de fausses informations sur votre site. Le format de réponse technique est ajouté automatiquement, ne le décrivez pas ici.'),
-      el('div', { class: 'row btn-row' },
-        el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveAi(); render(); toast('Modèle et consignes enregistrés.'); }) }, 'Enregistrer'),
-        el('button', { class: 'btn', type: 'button', onclick: safe(async () => {
-          await saveAi();
-          aiMsg.textContent = 'Test en cours...';
-          try { const r = await api('/ai/test', 'POST'); aiMsg.textContent = r.simulated ? 'Mode démonstration : aucun test réel.' : `Le modèle ${r.model} répond correctement.`; } catch (e) { aiMsg.textContent = ''; throw e; }
-        }) }, 'Tester le modèle'),
-        el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => {
-          if (!confirm('Revenir au texte d\'origine des consignes ? Vos modifications seront perdues.')) return;
-          await saveSettings({ systemPrompt: '' }); render(); toast('Consignes d\'origine rétablies.');
-        }) }, 'Rétablir le texte d\'origine')),
-      aiMsg,
-      el('p', { class: 'muted small' }, 'Sur l\'hébergement gratuit, ces réglages peuvent être réinitialisés lors d\'un redémarrage du serveur : gardez une copie de vos consignes.'));
-
-    const wpMsg = el('p', { class: 'muted small', id: 'wp-msg' });
-    const conn = (name, what, pill, extra) => el('div', { class: 'conn' }, el('div', { class: 'grow' }, el('b', {}, name), el('div', { class: 'muted small' }, what)), pill, extra || null);
-    const wpPill = st.simulate ? el('span', { class: 'pill warn' }, 'Démonstration') : st.wordpress ? el('span', { class: 'pill ok' }, 'Identifiants présents') : el('span', { class: 'pill ko' }, 'Non configuré');
-    const wpBtns = (st.wordpress || st.simulate) ? el('div', { class: 'actions' },
-      el('button', { class: 'btn', type: 'button', onclick: safe(async () => { const r = await api('/wp/test'); wpMsg.textContent = r.simulated ? 'Simulation : aucun test réel.' : `Connecté en tant que ${r.name}. Création de brouillons : ${r.canEdit ? 'oui' : 'non'}. Publication : ${r.canPublish ? 'oui' : 'non'}.`; }) }, 'Tester la connexion'),
-      el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await api('/category/ensure', 'POST'); toast('Catégorie « Blog » prête sur votre site.'); }) }, 'Préparer la catégorie « Blog »')) : null;
-
     return [
-      head('Réglages', 'Choisissez le rythme, les sujets et la liaison avec votre site.'),
       el('div', { class: 'card' }, el('h2', {}, 'Combien d\'articles par mois ?'), el('p', { class: 'muted' }, 'Déplacez le curseur. L\'outil ne rédigera jamais plus que ce nombre.'), big, freq, el('div', { class: 'scale' }, el('span', {}, '1'), el('span', {}, '8')), hint),
       el('div', { class: 'card' }, el('h2', {}, 'Vos sujets d\'articles'), el('p', { class: 'muted' }, 'Un sujet = un mot-clé que vous voulez travailler, avec une ville si utile.'),
         el('form', { class: 'row', onsubmit: safe(async (e) => { e.preventDefault(); S.settings = await api('/topics', 'POST', { keyword: kw.value, city: city.value }); render(); }) }, kw, city, el('button', { class: 'btn primary', type: 'submit' }, icon('plus'), 'Ajouter')), topics),
@@ -476,11 +462,132 @@
       el('div', { class: 'card' }, el('h2', {}, 'Votre entreprise'), el('p', { class: 'muted' }, 'Ces informations servent à rédiger les articles.'),
         el('label', { for: 'brand' }, 'Nom commercial'), brand, el('label', { for: 'zone' }, 'Zone desservie'), zone,
         el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveSettings({ brandName: brand.value, zone: zone.value }, 'Informations enregistrées.'); }) }, 'Enregistrer'))),
-      aiCard,
-      el('div', { class: 'card' }, el('h2', {}, 'Connexions'), el('p', { class: 'muted' }, 'État des services utilisés par l\'outil.'),
-        conn('Votre site WordPress', 'Pour créer et publier les articles', wpPill, wpBtns), el('div', {}, wpMsg),
-        conn('Rédaction automatique', 'Le service qui écrit les textes', st.simulate ? el('span', { class: 'pill warn' }, 'Démonstration') : st.openrouter ? el('span', { class: 'pill ok' }, 'Prêt') : el('span', { class: 'pill ko' }, 'Non configuré')),
-        conn('Vitesse du site (Google)', 'Facultatif : ajoute la vitesse mobile au score', st.pagespeed ? el('span', { class: 'pill ok' }, 'Activée') : el('span', { class: 'pill' }, 'Non activée'))),
+    ];
+  }
+
+  // ----- Connexions : mise en route, mode démonstration, WordPress, PageSpeed -----
+  function settingsConnexions() {
+    const s = S.settings, st = S.status;
+    const jump = (tab) => () => { S.settingsTab = tab; render(); };
+    const wpOk = st.wordpress, keyOk = s.secrets.openrouterKey.set, modelOk = !!((s.aiModel || '').trim() || S.aiDefaults.envModel);
+    const row = (ok, label, hintTxt, btn) => el('div', { class: 'conn' }, el('span', { class: 'dot-s ' + (ok ? 'ok' : 'nm') }, icon(ok ? 'check' : 'alert')),
+      el('div', { class: 'grow' }, el('b', {}, label), el('div', { class: 'muted small' }, hintTxt)), btn || null);
+    const setup = el('div', { class: 'card' }, el('h2', {}, 'Mise en route'), el('p', { class: 'muted' }, 'Quatre points pour passer du mode démonstration à l\'utilisation réelle.'),
+      row(wpOk, 'Liaison avec WordPress', wpOk ? 'Identifiant et mot de passe renseignés.' : 'Identifiant et mot de passe d\'application à saisir plus bas.'),
+      row(keyOk, 'Clé de rédaction (OpenRouter)', keyOk ? 'Clé renseignée.' : 'À saisir dans l\'onglet Rédaction.', keyOk ? null : el('button', { class: 'btn', type: 'button', onclick: jump('ia') }, 'Ouvrir Rédaction')),
+      row(modelOk, 'Modèle d\'intelligence artificielle', modelOk ? 'Un modèle est choisi.' : 'À choisir dans l\'onglet Rédaction.', modelOk ? null : el('button', { class: 'btn', type: 'button', onclick: jump('ia') }, 'Ouvrir Rédaction')),
+      row(!st.simulate, 'Mode réel activé', st.simulate ? 'Le mode démonstration est encore actif : aucun appel réel.' : 'Les vrais services sont utilisés. Rien n\'est publié sans votre validation.'));
+
+    const demo = el('input', { type: 'checkbox', checked: st.simulate ? true : false, id: 'demo', role: 'switch' });
+    demo.addEventListener('change', safe(async () => {
+      if (!demo.checked && !confirm('Passer en mode réel ? Les articles seront rédigés avec votre clé OpenRouter et envoyés en brouillon sur votre site. Rien n\'est publié sans votre validation.')) { demo.checked = true; return; }
+      await saveSettings({ simulate: demo.checked }, demo.checked ? 'Mode démonstration activé.' : 'Mode réel activé.'); render();
+    }));
+    const demoCard = el('div', { class: 'card' }, el('h2', {}, 'Mode démonstration'),
+      el('div', { class: 'switch-row' }, el('div', {}, el('b', {}, 'Faire semblant, sans rien envoyer'), el('p', { class: 'muted small' }, 'Les articles sont des textes de test et aucun appel n\'est fait à OpenRouter ni à WordPress. ' + (st.simulateFromSettings ? '' : 'Valeur actuelle fournie par le serveur.'))),
+        el('label', { class: 'switch', for: 'demo', 'aria-label': 'Mode démonstration' }, demo, el('span'))));
+
+    // WordPress
+    const wpSec = s.secrets.wpAppPassword;
+    const user = el('input', { type: 'text', id: 'wp-user', value: s.wpUser || '', placeholder: 'Identifiant WordPress', autocomplete: 'off', spellcheck: 'false' });
+    const pass = secretInput('wp-pass', wpSec, 'xxxx xxxx xxxx xxxx xxxx xxxx');
+    const site = el('input', { type: 'text', id: 'wp-site', value: st.siteUrl || '', readonly: 'readonly' });
+    const saveTestWp = safe(async () => {
+      const body = {};
+      if (user.value.trim() !== (s.wpUser || '')) body.wpUser = user.value;
+      if (pass.value) body.wpAppPassword = pass.value;
+      if (Object.keys(body).length) await saveSecrets(body);
+      setMsg('wp', 'ko', 'Test en cours...'); render();
+      try {
+        const r = await api('/wp/test');
+        setMsg('wp', r.canEdit ? 'ok' : 'ko', r.simulated ? 'Mode démonstration : aucun test réel. Désactivez-le ci-dessus pour tester la vraie connexion.'
+          : `Connexion réussie à « ${r.site || 'votre site'} », en tant que ${r.name}. Créer des brouillons : ${r.canEdit ? 'oui' : 'non'}. Publier : ${r.canPublish ? 'oui' : 'non'}.${r.canEdit ? '' : ' Ce compte ne peut pas créer d\'articles : utilisez un compte Auteur ou Éditeur.'}`);
+      } catch (e) { setMsg('wp', 'ko', e.message); }
+      render();
+    });
+    const wpCard = el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Liaison avec WordPress'), secretState(wpSec)),
+      el('p', { class: 'muted' }, 'Permet d\'envoyer les articles en brouillon sur votre site.'),
+      el('details', { class: 'faq' }, el('summary', {}, 'Où trouver le mot de passe d\'application ?'), el('div', { class: 'a' },
+        el('p', {}, 'À faire une fois, par un administrateur du site :'),
+        el('ol', { class: 'tasks' }, [
+          'Connectez-vous à WordPress, puis ouvrez Utilisateurs, Profil (idéalement un compte dédié avec le rôle Éditeur).',
+          'Descendez jusqu\'à « Mots de passe d\'application », saisissez le nom « Tableau de bord CityLock », puis cliquez sur « Ajouter ».',
+          'Copiez le mot de passe affiché (il ne s\'affiche qu\'une fois) et collez-le ci-dessous.'].map((x) => el('li', {}, x))),
+        el('p', { class: 'muted small' }, 'Ce n\'est pas le mot de passe de connexion à WordPress. Si la section est absente, le site doit être en HTTPS et une extension de sécurité peut l\'avoir désactivée.'))),
+      el('label', { for: 'wp-site' }, 'Adresse du site'), site, el('p', { class: 'muted small' }, 'Fixée sur le serveur, pour protéger vos identifiants.'),
+      el('label', { for: 'wp-user' }, 'Identifiant WordPress'), user,
+      el('label', { for: 'wp-pass' }, 'Mot de passe d\'application'), pass,
+      st.simulate ? el('div', { class: 'alert mt' }, 'Le mode démonstration est actif : le test ne contacte pas votre site.') : null,
+      el('div', { class: 'row btn-row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: saveTestWp }, 'Enregistrer et tester'),
+        el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await api('/category/ensure', 'POST'); toast('Catégorie « Blog » prête sur votre site.'); }) }, 'Préparer la catégorie « Blog »'),
+        wpSec.source === 'interface' ? el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => {
+          if (!confirm('Effacer le mot de passe enregistré ?')) return;
+          await saveSecrets({ wpAppPassword: '' }, 'Mot de passe effacé.'); render();
+        }) }, 'Effacer le mot de passe') : null),
+      msgBox('wp'));
+
+    // PageSpeed
+    const psSec = s.secrets.pagespeedKey;
+    const ps = secretInput('ps-key', psSec, 'Collez la clé Google PageSpeed');
+    const psCard = el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Vitesse du site (facultatif)'), secretState(psSec)),
+      el('p', { class: 'muted' }, 'Avec une clé Google PageSpeed Insights, le score mesure aussi la vitesse sur mobile. Sans clé, ce critère est simplement « non mesuré ».'),
+      el('label', { for: 'ps-key' }, 'Clé PageSpeed'), ps,
+      el('div', { class: 'row btn-row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { if (!ps.value) { toast('Collez d\'abord la clé.', true); return; } await saveSecrets({ pagespeedKey: ps.value }, 'Clé PageSpeed enregistrée.'); render(); }) }, 'Enregistrer'),
+        psSec.source === 'interface' ? el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => { await saveSecrets({ pagespeedKey: '' }, 'Clé effacée.'); render(); }) }, 'Effacer la clé') : null));
+
+    return [setup, demoCard, wpCard, psCard,
+      el('p', { class: 'muted small' }, 'Les clés saisies ici sont chiffrées sur le serveur et ne s\'affichent plus jamais. Sur l\'hébergement gratuit sans disque, elles sont effacées à un redémarrage : gardez aussi une copie dans les variables de l\'hébergeur.')];
+  }
+
+  // ----- Rédaction : clé OpenRouter, modèle, consignes -----
+  function settingsIa() {
+    const s = S.settings;
+    const D = S.aiDefaults;
+    const keySec = s.secrets.openrouterKey;
+    const key = secretInput('or-key', keySec, 'Collez la clé OpenRouter');
+    const rules = el('textarea', { id: 'rules', rows: 16, maxlength: D.maxLength, 'aria-label': 'Consignes de rédaction' });
+    rules.value = s.systemPrompt || D.systemPrompt;
+    const rulesCount = el('div', { class: 'count muted' });
+    const updCount = () => { rulesCount.textContent = `${rules.value.length} caractères sur ${D.maxLength}` + (rules.value.trim() === D.systemPrompt.trim() ? ' · texte d\'origine' : ' · texte personnalisé'); };
+    rules.addEventListener('input', updCount); updCount();
+    const model = el('input', { type: 'text', id: 'model', maxlength: 99, value: s.aiModel || '', placeholder: D.envModel ? 'Par défaut : ' + D.envModel : 'Exemple : anthropic/claude-haiku-5-5', autocomplete: 'off', spellcheck: 'false' });
+    const usedModel = s.aiModel || D.envModel;
+
+    const saveAll = async () => {
+      if (key.value) await saveSecrets({ openrouterKey: key.value });
+      const text = rules.value.trim() === D.systemPrompt.trim() ? '' : rules.value;
+      await saveSettings({ aiModel: model.value, systemPrompt: text });
+    };
+    return [
+      el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Clé OpenRouter'), secretState(keySec)),
+        el('p', { class: 'muted' }, 'OpenRouter est le service qui fait écrire les articles par l\'intelligence artificielle. Créez une clé sur openrouter.ai (menu Keys) et collez-la ici.'),
+        el('label', { for: 'or-key' }, 'Clé OpenRouter'), key,
+        keySec.hint ? el('p', { class: 'muted small' }, `Clé actuelle terminée par « ${keySec.hint} ».`) : null,
+        el('p', { class: 'muted small' }, 'La clé est chiffrée sur le serveur et ne s\'affiche plus jamais. Pour en changer, collez la nouvelle.'),
+        el('div', { class: 'row btn-row' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { if (!key.value) { toast('Collez d\'abord la clé.', true); return; } await saveSecrets({ openrouterKey: key.value }, 'Clé OpenRouter enregistrée.'); render(); }) }, 'Enregistrer la clé'),
+          keySec.source === 'interface' ? el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => { if (!confirm('Effacer la clé enregistrée ?')) return; await saveSecrets({ openrouterKey: '' }, 'Clé effacée.'); render(); }) }, 'Effacer la clé') : null)),
+      el('div', { class: 'card' }, el('h2', {}, 'Modèle et consignes'),
+        el('p', { class: 'muted' }, 'Choisissez le modèle d\'intelligence artificielle et les consignes qu\'il doit suivre pour écrire vos articles.'),
+        el('label', { for: 'model' }, 'Modèle OpenRouter'), model,
+        el('p', { class: 'muted small' }, usedModel ? `Modèle utilisé aujourd'hui : ${usedModel}${s.aiModel ? '' : ' (celui du serveur)'}.` : 'Aucun modèle choisi pour l\'instant.'),
+        el('p', { class: 'muted small' }, 'Copiez l\'identifiant exact depuis openrouter.ai/models, par exemple anthropic/claude-haiku-5-5. Laissez vide pour utiliser celui du serveur.'),
+        el('label', { for: 'rules' }, 'Consignes de rédaction'), rules, rulesCount,
+        el('div', { class: 'alert mt' }, 'Gardez les règles 2 et 3 (ne jamais inventer de chiffres, ne jamais promettre un classement) : elles évitent d\'afficher de fausses informations sur votre site. Le format de réponse technique est ajouté automatiquement, ne le décrivez pas ici.'),
+        el('div', { class: 'row btn-row' },
+          el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveAll(); setMsg('ia', 'ok', 'Modèle et consignes enregistrés.'); render(); }) }, 'Enregistrer'),
+          el('button', { class: 'btn', type: 'button', onclick: safe(async () => {
+            await saveAll(); setMsg('ia', 'ko', 'Test en cours...'); render();
+            try { const r = await api('/ai/test', 'POST'); setMsg('ia', 'ok', r.simulated ? 'Mode démonstration : aucun test réel. Désactivez-le dans Connexions pour tester le vrai modèle.' : `Le modèle ${r.model} répond correctement.`); } catch (e) { setMsg('ia', 'ko', e.message); }
+            render();
+          }) }, 'Enregistrer et tester'),
+          el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => {
+            if (!confirm('Revenir au texte d\'origine des consignes ? Vos modifications seront perdues.')) return;
+            await saveSettings({ systemPrompt: '' }); setMsg('ia', 'ok', 'Consignes d\'origine rétablies.'); render();
+          }) }, 'Rétablir le texte d\'origine')),
+        msgBox('ia'),
+        el('p', { class: 'muted small' }, 'Sur l\'hébergement gratuit, ces réglages peuvent être réinitialisés lors d\'un redémarrage du serveur : gardez une copie de vos consignes.')),
     ];
   }
   const freqHint = (n) => `Soit environ un article toutes les ${Math.max(1, Math.round(4.3 / n * 10) / 10).toString().replace('.', ',')} semaines.`;
@@ -494,7 +601,8 @@
       faq('Comment choisir le nombre d\'articles ?', 'Dans « Réglages », déplacez le curseur entre 1 et 8 articles par mois. Ajoutez ensuite vos sujets : un article est préparé par sujet.'),
       faq('Comment relire et publier un article ?', '1. Dans « Articles », cliquez sur « Rédiger les articles du mois ».', '2. Ouvrez un article. Lisez le texte. Les chiffres surlignés en jaune doivent être remplacés par une vraie source, directement dans WordPress.', '3. Quand tout est bon, cochez « J\'ai relu et validé », puis cliquez sur « Publier sur le site ».'),
       faq('Que veut dire « brouillon » ?', 'Un brouillon est un article enregistré sur votre site mais invisible du public. Vous pouvez le modifier tant que vous ne l\'avez pas publié.'),
-      faq('Comment changer le modèle ou les consignes de rédaction ?', 'Dans « Réglages », carte « Rédaction automatique » : indiquez l\'identifiant du modèle (à copier depuis openrouter.ai/models) et modifiez les consignes si besoin, puis cliquez sur « Enregistrer ». Le bouton « Tester le modèle » vérifie en quelques secondes que tout fonctionne.', 'Le bouton « Rétablir le texte d\'origine » remet les consignes de départ.'),
+      faq('Comment relier mon site WordPress ?', 'Dans « Réglages », onglet « Connexions », suivez la carte « Liaison avec WordPress » : un administrateur crée un mot de passe d\'application dans WordPress, puis vous collez l\'identifiant et ce mot de passe, et vous cliquez sur « Enregistrer et tester ». Un message vert confirme que ça marche.', 'La carte « Mise en route » en haut de l\'onglet vous indique ce qu\'il reste à faire.'),
+      faq('Comment changer le modèle ou les consignes de rédaction ?', 'Dans « Réglages », onglet « Rédaction » : collez la clé OpenRouter, indiquez l\'identifiant du modèle (à copier depuis openrouter.ai/models) et modifiez les consignes si besoin, puis cliquez sur « Enregistrer et tester ». Le bouton « Rétablir le texte d\'origine » remet les consignes de départ.'),
       faq('Que mesure le score ?', 'Un score sur 100 calculé avec des points précis : titres, descriptions, images décrites, liens cassés, pages trop courtes, plan du site, etc. Il vous dit quoi corriger en priorité.', 'Ce n\'est pas une note Google. Il ne mesure ni votre place dans les résultats, ni le nombre de visiteurs. Un bon score ne garantit aucun classement.'),
       faq('Pourquoi un chiffre est-il signalé « à vérifier » ?', 'L\'outil n\'a pas le droit d\'inventer des chiffres. Quand une statistique serait utile, il laisse un repère [SOURCE A VERIFIER] à remplacer par une source fiable, ou à supprimer.'),
       el('div', { class: 'card' }, el('h2', {}, 'Petit lexique'), el('dl', { class: 'gloss' },

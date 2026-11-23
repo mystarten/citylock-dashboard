@@ -142,7 +142,7 @@ test('API : auth, validation, lot simulé, brouillon, publication, suppression',
     // Aucun secret dans le front
     for (const f of ['index.html', 'app.js']) {
       const txt = fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
-      assert.ok(!/OPENROUTER|WP_APP_PASSWORD|sk-or-/.test(txt));
+      assert.ok(!/OPENROUTER_API_KEY|WP_APP_PASSWORD|sk-or-v1-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{30,}/.test(txt), 'variable ou clé en clair dans ' + f);
     }
   } finally { s.close(); }
 });
@@ -184,4 +184,106 @@ test('OpenRouter : le modèle et les consignes des réglages sont bien utilisés
     await assert.rejects(() => ai.testModel({ aiModel: 'mauvais/modele' }), /code 400.*Vérifiez l'identifiant du modèle/);
     assert.strictEqual(log.redact('erreur sk-or-test-1234567890 fin'), 'erreur [masqué] fin'); // la clé n'apparaît pas dans les logs
   } finally { Object.assign(process.env, saved); delete process.env.OPENROUTER_BASE_URL; srv.close(); }
+});
+
+test('clés saisies dans l\'interface : chiffrées, jamais renvoyées, prioritaires, masquées dans les journaux', async () => {
+  const secrets = require('../lib/secrets');
+  const store = require('../lib/store');
+  const saved = { ...process.env };
+  const s = await listen(server);
+  const base = `http://127.0.0.1:${s.address().port}`;
+  let cookie = '';
+  const call = async (method, p, body) => {
+    const res = await fetch(base + p, { method, headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'citylock', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    const sc = res.headers.get('set-cookie'); if (sc) cookie = sc.split(';')[0];
+    let json = null; try { json = await res.json(); } catch { /* */ }
+    return { status: res.status, json, text: JSON.stringify(json) };
+  };
+  try {
+    // chiffrement aller-retour, et illisible sans la bonne clé
+    const blob = secrets.encrypt('cle-test-secret-demo-0000');
+    assert.ok(!blob.includes('secret-demo') && blob.startsWith('enc1:'));
+    assert.strictEqual(secrets.decrypt(blob), 'cle-test-secret-demo-0000');
+    const parts = blob.split(':');
+    const body = Buffer.from(parts[3], 'base64'); body[0] ^= 0xff; // un octet modifié : l'authentification GCM doit refuser
+    assert.strictEqual(secrets.decrypt([parts[0], parts[1], parts[2], body.toString('base64')].join(':')), null);
+
+    assert.strictEqual((await call('PUT', '/api/secrets', { openrouterKey: 'x' })).status, 401); // connexion requise
+    await call('POST', '/api/login', { username: 'laurent-test', password: 'mdp-de-test-123' });
+
+    // validation
+    assert.strictEqual((await call('PUT', '/api/secrets', {})).status, 400);
+    assert.strictEqual((await call('PUT', '/api/secrets', { openrouterKey: 12 })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/secrets', { openrouterKey: 'abc\ndef' })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/secrets', { wpAppPassword: 'x'.repeat(500) })).status, 400);
+
+    // enregistrement : la valeur n'est JAMAIS renvoyée, ni par la réponse, ni par GET /api/settings, ni par /api/status
+    const KEY = 'cle-test-ABCDEFGHIJKLMNOP-1234';
+    const put = await call('PUT', '/api/secrets', { openrouterKey: KEY, wpAppPassword: 'abcd efgh ijkl mnop', pagespeedKey: 'pagespeed-test-demo-key', wpUser: 'laurent' });
+    assert.strictEqual(put.status, 200);
+    for (const r of [put, await call('GET', '/api/settings'), await call('GET', '/api/status'), await call('POST', '/api/topics', { keyword: 'fuite test' })]) {
+      assert.ok(!/ABCDEFGHIJKLMNOP|abcd efgh|pagespeed-test-demo|enc1:/.test(r.text), 'une clé a fuité vers le navigateur : ' + r.text.slice(0, 120));
+    }
+    const st = (await call('GET', '/api/settings')).json;
+    assert.deepStrictEqual([st.secrets.openrouterKey.set, st.secrets.openrouterKey.source, st.secrets.openrouterKey.hint, st.wpUser], [true, 'interface', '1234', 'laurent']);
+    // sur le disque : chiffrée, pas en clair
+    const onDisk = fs.readFileSync(path.join(process.env.DATA_DIR, 'settings.json'), 'utf8');
+    assert.ok(!onDisk.includes('ABCDEFGHIJKLMNOP') && !onDisk.includes('abcd efgh') && onDisk.includes('enc1:'));
+
+    // la valeur de l'interface prend le pas sur la variable du serveur ; vide = on efface et on revient au serveur
+    process.env.OPENROUTER_API_KEY = 'cle-du-serveur-0000';
+    assert.strictEqual(secrets.get('openrouterKey'), KEY);
+    await call('PUT', '/api/secrets', { openrouterKey: '' });
+    assert.strictEqual(secrets.get('openrouterKey'), 'cle-du-serveur-0000');
+    assert.strictEqual((await call('GET', '/api/settings')).json.secrets.openrouterKey.source, 'serveur');
+
+    // les journaux masquent les clés de l'interface
+    await call('PUT', '/api/secrets', { openrouterKey: KEY });
+    assert.strictEqual(log.redact(`erreur avec ${KEY} et abcd efgh ijkl mnop`), 'erreur avec [masqué] et [masqué]');
+    assert.ok(!log.redact('Basic ' + Buffer.from('laurent:abcd efgh ijkl mnop').toString('base64')).includes('bGF1cmVudDph'));
+
+    // mode démonstration réglable depuis l'interface (repli sur SIMULATE du serveur tant qu'on n'y touche pas)
+    process.env.SIMULATE = 'true';
+    assert.strictEqual((await call('GET', '/api/status')).json.simulate, true);
+    const base2 = { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK' };
+    assert.strictEqual((await call('PUT', '/api/settings', { ...base2, simulate: 'non' })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { ...base2, simulate: false })).status, 200);
+    assert.strictEqual((await call('GET', '/api/status')).json.simulate, false);
+    assert.strictEqual((await call('PUT', '/api/settings', { ...base2, simulate: true })).json.simulate, true);
+  } finally {
+    for (const k of ['openrouterKey', 'wpAppPassword', 'pagespeedKey']) secrets.set(k, '');
+    const st = store.getSettings(); delete st.simulate; st.wpUser = ''; store.saveSettings(st);
+    Object.assign(process.env, saved); s.close();
+  }
+});
+
+test('WordPress : identifiants de l\'interface utilisés, diagnostic en 2 étapes, HTTPS obligatoire', async () => {
+  const secrets = require('../lib/secrets');
+  const store = require('../lib/store');
+  const fake = create();
+  const srv = await listen(fake.app);
+  const saved = { ...process.env };
+  try {
+    delete process.env.WP_USER; delete process.env.WP_APP_PASSWORD;
+    Object.assign(process.env, { SIMULATE: 'false', WP_BASE_URL: `http://127.0.0.1:${srv.address().port}` });
+    assert.strictEqual(wp.configured(), false);
+    await assert.rejects(() => wp.testConnection(), /manquant/); // pas d'identifiants nulle part
+
+    const st = store.getSettings(); st.wpUser = 'laurent'; store.saveSettings(st);
+    secrets.set('wpAppPassword', 'abcd efgh');
+    assert.strictEqual(wp.configured(), true);
+    const r = await wp.testConnection();
+    assert.deepStrictEqual([r.ok, r.site, r.name, r.canEdit, r.canPublish], [true, 'Faux site CityLock', 'Laurent', true, true]);
+
+    secrets.set('wpAppPassword', 'mauvais mot de passe');
+    await assert.rejects(() => wp.testConnection(), /401.*incorrect/);
+
+    // l'adresse du site ne peut pas être en http (hors machine locale) : les identifiants ne circulent pas en clair
+    process.env.WP_BASE_URL = 'http://citylock.fr';
+    secrets.set('wpAppPassword', 'abcd efgh');
+    await assert.rejects(() => wp.testConnection(), /https/);
+  } finally {
+    secrets.set('wpAppPassword', ''); const st = store.getSettings(); st.wpUser = ''; store.saveSettings(st);
+    Object.assign(process.env, saved); srv.close();
+  }
 });

@@ -25,6 +25,8 @@ function create({ robots = true } = {}) {
   app.get('/hello-world/', (req, res) => res.send(page({ title: 'Hello world', meta: 'm'.repeat(140), imgs: ['x'] })));
   // /gone/ et /lien-mort/ : 404 par défaut
 
+  app.get('/wp-json/', (req, res) => res.json({ name: 'Faux site CityLock' }));
+
   // API REST WordPress minimale (authentification Basic obligatoire)
   const needAuth = (req, res, next) => {
     const exp = 'Basic ' + Buffer.from('laurent:abcd efgh').toString('base64');

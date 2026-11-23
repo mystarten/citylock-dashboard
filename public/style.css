@@ -234,3 +234,9 @@ textarea { width: 100%; padding: 12px 14px; border: 1.5px solid var(--border); b
 textarea:focus { border-color: var(--accent); outline: 3px solid var(--accent-soft); }
 .btn-row { margin-top: 14px; gap: 10px; }
 .mt { margin-top: 12px; }
+
+.seg { display: inline-flex; flex-wrap: wrap; gap: 4px; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 4px; margin-bottom: 18px; max-width: 100%; }
+.seg button { border: 0; background: transparent; padding: 9px 16px; border-radius: 9px; font: inherit; font-weight: 700; color: var(--muted); cursor: pointer; }
+.seg button.on { background: var(--navy); color: #fff; }
+.row-between { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+input[readonly] { background: var(--bg); color: var(--muted); }

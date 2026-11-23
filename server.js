@@ -10,6 +10,8 @@ const auth = require('./lib/auth');
 const ai = require('./lib/ai');
 const wp = require('./lib/wp');
 const audit = require('./lib/audit');
+const secrets = require('./lib/secrets');
+const { isSimulated } = require('./lib/config');
 
 // --- Configuration obligatoire ---
 if (!process.env.DASHBOARD_USER || !process.env.DASHBOARD_PASSWORD || !process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 16) {
@@ -47,7 +49,7 @@ const wrap = (fn) => (req, res) => Promise.resolve().then(() => fn(req, res)).ca
 const fail = (status, message) => Object.assign(new Error(message), { httpStatus: status });
 
 // --- Session ---
-app.get('/api/session', (req, res) => res.json({ authenticated: auth.isAuthenticated(req), simulate: process.env.SIMULATE === 'true' }));
+app.get('/api/session', (req, res) => res.json({ authenticated: auth.isAuthenticated(req), simulate: isSimulated() }));
 app.post('/api/login', (req, res) => {
   const b = req.body || {};
   const r = auth.login(req, res, b.username, b.password, b.remember === true);
@@ -59,20 +61,30 @@ app.post('/api/logout', (req, res) => { auth.logout(res); res.json({ ok: true })
 app.use('/api', auth.requireAuth);
 
 // --- Etat de configuration (jamais les valeurs) ---
-app.get('/api/status', (req, res) => res.json({
-  simulate: process.env.SIMULATE === 'true',
-  openrouter: !!(process.env.OPENROUTER_API_KEY && ai.effectiveModel(store.getSettings())),
-  openrouterKey: !!process.env.OPENROUTER_API_KEY,
-  wordpress: !!(process.env.WP_BASE_URL && process.env.WP_USER && process.env.WP_APP_PASSWORD),
-  pagespeed: !!process.env.PAGESPEED_API_KEY,
-  siteUrl: process.env.WP_BASE_URL || '',
-  supportContact: process.env.SUPPORT_CONTACT || '',
-}));
+app.get('/api/status', (req, res) => {
+  const st = secrets.status();
+  const set = store.getSettings();
+  res.json({
+    simulate: isSimulated(),
+    simulateFromSettings: typeof set.simulate === 'boolean',
+    openrouter: !!(secrets.get('openrouterKey') && ai.effectiveModel(set)),
+    wordpress: wp.configured(),
+    pagespeed: st.pagespeedKey.set,
+    siteUrl: process.env.WP_BASE_URL || '',
+    supportContact: process.env.SUPPORT_CONTACT || '',
+  });
+});
 
 // --- Réglages ---
+// Ce que le navigateur reçoit : jamais les clés, seulement leur état.
+function publicSettings(s = store.getSettings()) {
+  const { secrets: _hidden, ...rest } = s;
+  return { ...rest, wpUser: (s.wpUser || '').trim(), secrets: secrets.status() };
+}
+
 const clean = (v, max) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f<>]/g, '').trim().slice(0, max) : '');
 
-app.get('/api/settings', (req, res) => res.json(store.getSettings()));
+app.get('/api/settings', (req, res) => res.json(publicSettings()));
 
 app.put('/api/settings', wrap((req, res) => {
   const b = req.body || {};
@@ -82,6 +94,7 @@ app.put('/api/settings', wrap((req, res) => {
   const brandName = clean(b.brandName, 60);
   if (!zone || !brandName) throw fail(400, 'La zone desservie et le nom commercial sont obligatoires.');
   if (b.autoDraft !== undefined && typeof b.autoDraft !== 'boolean') throw fail(400, 'Réglage invalide.');
+  if (b.simulate !== undefined && typeof b.simulate !== 'boolean') throw fail(400, 'Réglage invalide.');
   let aiModel, systemPrompt;
   if (b.aiModel !== undefined) {
     if (typeof b.aiModel !== 'string') throw fail(400, 'Modèle invalide.');
@@ -98,10 +111,11 @@ app.put('/api/settings', wrap((req, res) => {
   const s = store.getSettings();
   Object.assign(s, { frequency: freq, zone, brandName });
   if (typeof b.autoDraft === 'boolean') s.autoDraft = b.autoDraft;
+  if (typeof b.simulate === 'boolean') s.simulate = b.simulate;
   if (aiModel !== undefined) s.aiModel = aiModel;
   if (systemPrompt !== undefined) s.systemPrompt = systemPrompt;
   store.saveSettings(s);
-  res.json(s);
+  res.json(publicSettings(s));
 }));
 
 app.post('/api/topics', wrap((req, res) => {
@@ -113,21 +127,44 @@ app.post('/api/topics', wrap((req, res) => {
   if (s.topics.some((t) => t.keyword.toLowerCase() === keyword.toLowerCase() && (t.city || '').toLowerCase() === city.toLowerCase())) throw fail(409, 'Ce sujet existe déjà.');
   s.topics.push({ id: crypto.randomUUID(), keyword, city });
   store.saveSettings(s);
-  res.status(201).json(s);
+  res.status(201).json(publicSettings(s));
 }));
 
 app.delete('/api/topics/:id', wrap((req, res) => {
   const s = store.getSettings();
   s.topics = s.topics.filter((t) => t.id !== req.params.id);
   store.saveSettings(s);
-  res.json(s);
+  res.json(publicSettings(s));
+}));
+
+// Clés et identifiants : on peut les remplacer ou les effacer (chaîne vide), jamais les relire.
+const SECRET_LIMITS = { openrouterKey: 400, wpAppPassword: 120, pagespeedKey: 200 };
+app.put('/api/secrets', wrap((req, res) => {
+  const b = req.body || {};
+  const clean1 = (v, max, label) => {
+    if (typeof v !== 'string') throw fail(400, `${label} : valeur invalide.`);
+    const t = v.trim();
+    if (t.length > max) throw fail(400, `${label} : valeur trop longue.`);
+    if (/[\u0000-\u001f\u007f]/.test(t)) throw fail(400, `${label} : caractères non autorisés (ne collez que la clé, sans retour à la ligne).`);
+    return t;
+  };
+  const labels = { openrouterKey: 'Clé OpenRouter', wpAppPassword: 'Mot de passe d\'application', pagespeedKey: 'Clé PageSpeed' };
+  const updates = {};
+  for (const name of Object.keys(SECRET_LIMITS)) if (b[name] !== undefined) updates[name] = clean1(b[name], SECRET_LIMITS[name], labels[name]);
+  let wpUser;
+  if (b.wpUser !== undefined) wpUser = clean1(b.wpUser, 100, 'Identifiant WordPress');
+  if (!Object.keys(updates).length && wpUser === undefined) throw fail(400, 'Rien à enregistrer.');
+  for (const [name, v] of Object.entries(updates)) secrets.set(name, v);
+  if (wpUser !== undefined) { const s = store.getSettings(); s.wpUser = wpUser; store.saveSettings(s); }
+  log.info('Clés ou identifiants modifiés depuis l\'interface (valeurs non journalisées)');
+  res.json(publicSettings());
 }));
 
 app.get('/api/ai/defaults', (req, res) => res.json({ systemPrompt: ai.DEFAULT_RULES, maxLength: ai.MAX_RULES_LENGTH, envModel: process.env.OPENROUTER_MODEL || '' }));
 
 let lastAiTest = 0;
 app.post('/api/ai/test', wrap(async (req, res) => {
-  if (Date.now() - lastAiTest < 5000) throw fail(429, 'Patientez quelques secondes avant de retester.');
+  if (Date.now() - lastAiTest < 2000) throw fail(429, 'Patientez quelques secondes avant de retester.');
   lastAiTest = Date.now();
   res.json(await ai.testModel(store.getSettings()));
 }));
@@ -153,7 +190,7 @@ async function pushDraft(a) {
   const post = await wp.createDraft(a, cat);
   Object.assign(a, { status: 'brouillon_wp', wpId: post.id, wpLink: post.link });
 }
-const wpReady = () => process.env.SIMULATE === 'true' || !!(process.env.WP_BASE_URL && process.env.WP_USER && process.env.WP_APP_PASSWORD);
+const wpReady = () => isSimulated() || wp.configured();
 const findArticle = (id) => {
   const list = store.getArticles();
   const a = list.find((x) => x.id === id);
@@ -174,8 +211,8 @@ app.post('/api/articles/batch', wrap((req, res) => {
   const usedTopics = new Set(already.map((a) => a.topicId));
   const todo = s.topics.filter((t) => !usedTopics.has(t.id)).slice(0, remaining);
   if (!todo.length) throw fail(400, 'Aucun sujet validé disponible. Ajoutez des sujets dans l\'écran Réglages.');
-  if (process.env.SIMULATE !== 'true') {
-    if (!process.env.OPENROUTER_API_KEY) throw fail(400, 'La clé OpenRouter n\'est pas configurée (OPENROUTER_API_KEY, à saisir dans l\'hébergeur).');
+  if (!isSimulated()) {
+    if (!secrets.get('openrouterKey')) throw fail(400, 'La clé OpenRouter n\'est pas configurée. Saisissez-la dans Réglages, Rédaction.');
     if (!ai.effectiveModel(s)) throw fail(400, 'Aucun modèle OpenRouter choisi. Indiquez-en un dans Réglages, Rédaction automatique.');
   }
 
@@ -192,7 +229,7 @@ app.post('/api/articles/batch', wrap((req, res) => {
         const rec = {
           id: crypto.randomUUID(), topicId: topic.id, keyword: topic.keyword, city: topic.city, month,
           createdAt: new Date().toISOString(), status: 'a_relire', wpId: null, wpLink: null,
-          simulated: process.env.SIMULATE === 'true', ...art,
+          simulated: isSimulated(), ...art,
         };
         if (s.autoDraft && wpReady()) {
           try { await pushDraft(rec); } catch (e) {
@@ -228,7 +265,7 @@ app.post('/api/articles/:id/publish', wrap(async (req, res) => {
   if (!req.body || req.body.validated !== true) throw fail(400, 'Vous devez confirmer « J\'ai relu et validé ».');
   if (a.status !== 'brouillon_wp') throw fail(409, 'Envoyez d\'abord l\'article en brouillon WordPress.');
   // Garde-fou : on relit le texte réellement présent dans WordPress (il a pu être corrigé là-bas).
-  if (process.env.SIMULATE !== 'true') {
+  if (!isSimulated()) {
     const live = await wp.getContent(a.wpId);
     if (live.includes('[SOURCE A VERIFIER]')) throw fail(409, 'Le texte contient encore « [SOURCE A VERIFIER] ». Remplacez ce marqueur par une vraie source (ou supprimez la phrase) dans WordPress, puis réessayez.');
   }
@@ -268,6 +305,6 @@ const port = Number(process.env.PORT) || 3000;
 if (require.main === module) {
   // Tâche planifiée : lundi 8 h, Europe/Paris.
   cron.schedule('0 8 * * 1', () => { audit.runAudit('hebdomadaire').catch(() => {}); }, { timezone: 'Europe/Paris' });
-  app.listen(port, () => log.info(`Tableau de bord CityLock sur le port ${port}${process.env.SIMULATE === 'true' ? ' (MODE SIMULATION)' : ''}`));
+  app.listen(port, () => log.info(`Tableau de bord CityLock sur le port ${port}${isSimulated() ? ' (MODE SIMULATION)' : ''}`));
 }
 module.exports = app;
