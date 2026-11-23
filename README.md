@@ -32,7 +32,8 @@ npm test
 | `DASHBOARD_USER` | oui | Identifiant de connexion (choisi par vous) |
 | `DASHBOARD_PASSWORD` | oui | Mot de passe de connexion |
 | `SESSION_SECRET` | oui | Signe le cookie de session (32 caractères aléatoires : `openssl rand -hex 32`) |
-| `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | pour rédiger | Clé et identifiant du modèle (à choisir sur openrouter.ai) |
+| `OPENROUTER_API_KEY` | pour rédiger | Clé OpenRouter (secrète, uniquement dans l'hébergeur) |
+| `OPENROUTER_MODEL` | non | Modèle par défaut. Il se change ensuite dans Réglages, Rédaction automatique, sans redéployer |
 | `WP_BASE_URL` | oui | `https://citylock.fr` |
 | `WP_USER`, `WP_APP_PASSWORD` | pour WordPress | Identifiant et mot de passe d'application |
 | `PAGESPEED_API_KEY` | non | Sans elle, le critère vitesse est « non mesuré » |
@@ -77,6 +78,16 @@ Si la section est absente : le site doit être en HTTPS, et une extension de sé
 **La publication reste manuelle, volontairement** : un texte rédigé par IA peut contenir des chiffres non vérifiés. Le bouton « Publier » exige la case « J'ai relu et validé ». De plus, le serveur relit le texte réellement présent dans WordPress et refuse de publier s'il contient encore le marqueur `[SOURCE A VERIFIER]`.
 
 Pannes fréquentes : l'API REST désactivée par une extension de sécurité, un pare-feu qui bloque l'hébergeur, un site sans HTTPS, ou un utilisateur WordPress sans le droit de créer des articles (prendre le rôle Éditeur).
+
+## Modèle et consignes modifiables depuis l'interface
+
+Dans Réglages, carte « Rédaction automatique » :
+- **Modèle OpenRouter** : identifiant à copier depuis openrouter.ai/models. Vide = celui de la variable `OPENROUTER_MODEL`.
+- **Consignes de rédaction** : le prompt système, modifiable (6000 caractères maximum). « Rétablir le texte d'origine » le remet comme au départ.
+- **Tester le modèle** : un appel de quelques mots pour vérifier la clé et l'identifiant avant de lancer un lot.
+- Le **format de réponse JSON** est toujours ajouté par le code et n'est pas modifiable : le serveur en a besoin pour lire l'article. Si vous supprimez les règles « pas de chiffres inventés » ou « pas de promesse de classement », elles ne sont plus imposées au modèle (le serveur signale seulement les prix et pourcentages dans les remarques de relecture).
+- La clé OpenRouter, elle, ne se saisit jamais dans l'interface.
+- Sur l'hébergement gratuit sans disque, ces réglages sont effacés à un redémarrage et on revient au texte d'origine et au modèle de `OPENROUTER_MODEL`.
 
 ## Choix faits (points ambigus)
 

@@ -229,3 +229,8 @@ dl.gloss dt { font-weight: 800; color: var(--navy); margin-top: 12px; } dl.gloss
   .detail .col.side-col { order: -1; }
   .stepper .s { flex-basis: 45%; }
 }
+
+textarea { width: 100%; padding: 12px 14px; border: 1.5px solid var(--border); border-radius: 10px; font: inherit; font-size: .93rem; line-height: 1.5; background: #fff; color: var(--text); resize: vertical; min-height: 220px; }
+textarea:focus { border-color: var(--accent); outline: 3px solid var(--accent-soft); }
+.btn-row { margin-top: 14px; gap: 10px; }
+.mt { margin-top: 12px; }

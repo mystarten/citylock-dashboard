@@ -61,7 +61,8 @@ app.use('/api', auth.requireAuth);
 // --- Etat de configuration (jamais les valeurs) ---
 app.get('/api/status', (req, res) => res.json({
   simulate: process.env.SIMULATE === 'true',
-  openrouter: !!(process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_MODEL),
+  openrouter: !!(process.env.OPENROUTER_API_KEY && ai.effectiveModel(store.getSettings())),
+  openrouterKey: !!process.env.OPENROUTER_API_KEY,
   wordpress: !!(process.env.WP_BASE_URL && process.env.WP_USER && process.env.WP_APP_PASSWORD),
   pagespeed: !!process.env.PAGESPEED_API_KEY,
   siteUrl: process.env.WP_BASE_URL || '',
@@ -81,9 +82,24 @@ app.put('/api/settings', wrap((req, res) => {
   const brandName = clean(b.brandName, 60);
   if (!zone || !brandName) throw fail(400, 'La zone desservie et le nom commercial sont obligatoires.');
   if (b.autoDraft !== undefined && typeof b.autoDraft !== 'boolean') throw fail(400, 'Réglage invalide.');
+  let aiModel, systemPrompt;
+  if (b.aiModel !== undefined) {
+    if (typeof b.aiModel !== 'string') throw fail(400, 'Modèle invalide.');
+    aiModel = b.aiModel.trim();
+    if (aiModel && !ai.MODEL_PATTERN.test(aiModel)) throw fail(400, 'Identifiant de modèle invalide. Copiez-le tel quel depuis openrouter.ai/models (exemple : anthropic/claude-haiku-5-5), sans espace.');
+  }
+  if (b.systemPrompt !== undefined) {
+    if (typeof b.systemPrompt !== 'string') throw fail(400, 'Consignes invalides.');
+    systemPrompt = b.systemPrompt.replace(/\r\n/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+    if (systemPrompt.length > ai.MAX_RULES_LENGTH) throw fail(400, `Les consignes sont trop longues (maximum ${ai.MAX_RULES_LENGTH} caractères).`);
+    if (systemPrompt && systemPrompt.length < 80) throw fail(400, 'Les consignes sont trop courtes pour être utiles. Videz le champ pour revenir au texte d\'origine.');
+    if (systemPrompt === ai.DEFAULT_RULES.trim()) systemPrompt = ''; // identique à l'original : on n'enregistre rien
+  }
   const s = store.getSettings();
   Object.assign(s, { frequency: freq, zone, brandName });
   if (typeof b.autoDraft === 'boolean') s.autoDraft = b.autoDraft;
+  if (aiModel !== undefined) s.aiModel = aiModel;
+  if (systemPrompt !== undefined) s.systemPrompt = systemPrompt;
   store.saveSettings(s);
   res.json(s);
 }));
@@ -105,6 +121,15 @@ app.delete('/api/topics/:id', wrap((req, res) => {
   s.topics = s.topics.filter((t) => t.id !== req.params.id);
   store.saveSettings(s);
   res.json(s);
+}));
+
+app.get('/api/ai/defaults', (req, res) => res.json({ systemPrompt: ai.DEFAULT_RULES, maxLength: ai.MAX_RULES_LENGTH, envModel: process.env.OPENROUTER_MODEL || '' }));
+
+let lastAiTest = 0;
+app.post('/api/ai/test', wrap(async (req, res) => {
+  if (Date.now() - lastAiTest < 5000) throw fail(429, 'Patientez quelques secondes avant de retester.');
+  lastAiTest = Date.now();
+  res.json(await ai.testModel(store.getSettings()));
 }));
 
 app.get('/api/wp/test', wrap(async (req, res) => res.json(await wp.testConnection())));
@@ -149,7 +174,10 @@ app.post('/api/articles/batch', wrap((req, res) => {
   const usedTopics = new Set(already.map((a) => a.topicId));
   const todo = s.topics.filter((t) => !usedTopics.has(t.id)).slice(0, remaining);
   if (!todo.length) throw fail(400, 'Aucun sujet validé disponible. Ajoutez des sujets dans l\'écran Réglages.');
-  if (process.env.SIMULATE !== 'true' && !(process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_MODEL)) throw fail(400, 'OpenRouter n\'est pas configuré (OPENROUTER_API_KEY, OPENROUTER_MODEL).');
+  if (process.env.SIMULATE !== 'true') {
+    if (!process.env.OPENROUTER_API_KEY) throw fail(400, 'La clé OpenRouter n\'est pas configurée (OPENROUTER_API_KEY, à saisir dans l\'hébergeur).');
+    if (!ai.effectiveModel(s)) throw fail(400, 'Aucun modèle OpenRouter choisi. Indiquez-en un dans Réglages, Rédaction automatique.');
+  }
 
   Object.assign(batch, { running: true, total: todo.length, done: 0, errors: [] });
   res.status(202).json({ started: todo.length });

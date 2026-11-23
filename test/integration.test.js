@@ -14,6 +14,9 @@ delete process.env.PAGESPEED_API_KEY;
 const { create } = require('./fake-site');
 const audit = require('../lib/audit');
 const wp = require('../lib/wp');
+const ai = require('../lib/ai');
+const log = require('../lib/log');
+const http = require('http');
 const server = require('../server');
 
 const listen = (app) => new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
@@ -110,6 +113,23 @@ test('API : auth, validation, lot simulé, brouillon, publication, suppression',
     assert.strictEqual((await call('DELETE', `/api/articles/${list[1].id}`)).status, 200);
     assert.strictEqual((await call('GET', '/api/articles')).json.length, 1);
 
+    // Modèle et consignes modifiables depuis les réglages
+    const base = { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', autoDraft: true };
+    assert.strictEqual((await call('PUT', '/api/settings', { ...base, aiModel: 'modele avec espace' })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { ...base, aiModel: 42 })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { ...base, systemPrompt: 'court' })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { ...base, systemPrompt: 'x'.repeat(6001) })).status, 400);
+    const okSet = await call('PUT', '/api/settings', { ...base, aiModel: ' anthropic/claude-haiku-5-5 ', systemPrompt: 'Consigne personnalisée. '.repeat(10) });
+    assert.strictEqual(okSet.status, 200);
+    assert.strictEqual(okSet.json.aiModel, 'anthropic/claude-haiku-5-5');
+    assert.ok(okSet.json.systemPrompt.startsWith('Consigne personnalisée.'));
+    const defs = (await call('GET', '/api/ai/defaults')).json;
+    assert.ok(defs.systemPrompt.includes('N\'invente JAMAIS') && defs.maxLength === 6000);
+    // un texte identique à l'original n'est pas enregistré comme personnalisé
+    assert.strictEqual((await call('PUT', '/api/settings', { ...base, systemPrompt: defs.systemPrompt })).json.systemPrompt, '');
+    assert.strictEqual((await call('PUT', '/api/settings', { ...base, aiModel: '' })).json.aiModel, '');
+    assert.strictEqual((await call('GET', '/api/settings')).json.frequency, 2); // les champs absents ne sont pas écrasés
+
     // Envoi automatique en brouillon : le nouvel article arrive directement au statut brouillon WordPress
     assert.strictEqual((await call('PUT', '/api/settings', { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', autoDraft: true })).status, 200);
     assert.strictEqual((await call('POST', '/api/articles/batch')).status, 202);
@@ -125,4 +145,43 @@ test('API : auth, validation, lot simulé, brouillon, publication, suppression',
       assert.ok(!/OPENROUTER|WP_APP_PASSWORD|sk-or-/.test(txt));
     }
   } finally { s.close(); }
+});
+
+test('OpenRouter : le modèle et les consignes des réglages sont bien utilisés (faux serveur local)', async () => {
+  const seen = [];
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const j = JSON.parse(body);
+      seen.push({ auth: req.headers.authorization, j });
+      if (j.model === 'mauvais/modele') { res.statusCode = 400; return res.end('{"error":"invalid model"}'); }
+      const art = { title: 'T', metaTitle: 'M', metaDescription: 'D', slug: 't', htmlContent: '<p>texte</p>', internalLinkSuggestions: [], faitsAVerifier: [] };
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: j.max_tokens === 8 ? 'OK' : JSON.stringify(art) } }] }));
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const saved = { ...process.env };
+  try {
+    Object.assign(process.env, { SIMULATE: 'false', OPENROUTER_BASE_URL: `http://127.0.0.1:${srv.address().port}`, OPENROUTER_API_KEY: 'sk-or-test-1234567890', OPENROUTER_MODEL: 'env/modele' });
+    const topic = { keyword: 'alarme', city: 'Chatou' };
+    const rules = 'MES CONSIGNES A MOI. '.repeat(8);
+
+    await ai.generateArticle(topic, { brandName: 'CITYLOCK', zone: 'Chatou', aiModel: 'anthropic/claude-haiku-5-5', systemPrompt: rules });
+    let req = seen.pop();
+    assert.strictEqual(req.j.model, 'anthropic/claude-haiku-5-5');                    // modèle des réglages
+    assert.ok(req.j.messages[0].content.startsWith('MES CONSIGNES A MOI.'));          // consignes personnalisées
+    assert.ok(req.j.messages[0].content.includes('FORMAT DE REPONSE'));               // contrat JSON toujours ajouté
+    assert.strictEqual(req.auth, 'Bearer sk-or-test-1234567890');
+
+    await ai.generateArticle(topic, { brandName: 'CITYLOCK', zone: 'Chatou', aiModel: '', systemPrompt: '' });
+    req = seen.pop();
+    assert.strictEqual(req.j.model, 'env/modele');                                    // repli sur la variable du serveur
+    assert.ok(req.j.messages[0].content.includes('N\'invente JAMAIS'));               // consignes d'origine
+
+    assert.deepStrictEqual(await ai.testModel({ aiModel: '' }), { ok: true, model: 'env/modele' });
+    await assert.rejects(() => ai.testModel({ aiModel: 'mauvais/modele' }), /code 400.*Vérifiez l'identifiant du modèle/);
+    assert.strictEqual(log.redact('erreur sk-or-test-1234567890 fin'), 'erreur [masqué] fin'); // la clé n'apparaît pas dans les logs
+  } finally { Object.assign(process.env, saved); delete process.env.OPENROUTER_BASE_URL; srv.close(); }
 });

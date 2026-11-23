@@ -99,8 +99,8 @@
   }
 
   async function refresh() {
-    const [settings, status, articles, audits] = await Promise.all([api('/settings'), api('/status'), api('/articles'), api('/audits')]);
-    Object.assign(S, { settings, status, articles, audits });
+    const [settings, status, articles, audits, aiDefaults] = await Promise.all([api('/settings'), api('/status'), api('/articles'), api('/audits'), api('/ai/defaults')]);
+    Object.assign(S, { settings, status, articles, audits, aiDefaults });
     S.auditRunning = !!audits.status.running;
     $('sim').classList.toggle('hidden', !status.simulate);
   }
@@ -394,7 +394,10 @@
   // ---------- Réglages ----------
   async function saveSettings(patch, msg) {
     const s = { ...S.settings, ...patch };
-    S.settings = await api('/settings', 'PUT', { frequency: Number(s.frequency), brandName: s.brandName, zone: s.zone, autoDraft: s.autoDraft });
+    const payload = { frequency: Number(s.frequency), brandName: s.brandName, zone: s.zone, autoDraft: s.autoDraft };
+    if ('aiModel' in patch) payload.aiModel = patch.aiModel;
+    if ('systemPrompt' in patch) payload.systemPrompt = patch.systemPrompt;
+    S.settings = await api('/settings', 'PUT', payload);
     if (msg) toast(msg);
   }
 
@@ -419,6 +422,42 @@
     const auto = el('input', { type: 'checkbox', checked: s.autoDraft ? true : false, id: 'auto', role: 'switch' });
     auto.addEventListener('change', safe(async () => { await saveSettings({ autoDraft: auto.checked }, auto.checked ? 'Envoi automatique activé.' : 'Envoi automatique désactivé.'); }));
 
+
+    // Rédaction automatique : modèle et consignes modifiables
+    const D = S.aiDefaults;
+    const rules = el('textarea', { id: 'rules', rows: 16, maxlength: D.maxLength, 'aria-label': 'Consignes de rédaction' });
+    rules.value = s.systemPrompt || D.systemPrompt;
+    const rulesCount = el('div', { class: 'count muted' });
+    const updCount = () => { rulesCount.textContent = `${rules.value.length} caractères sur ${D.maxLength}` + (rules.value.trim() === D.systemPrompt.trim() ? ' · texte d\'origine' : ' · texte personnalisé'); };
+    rules.addEventListener('input', updCount); updCount();
+    const model = el('input', { type: 'text', id: 'model', maxlength: 99, value: s.aiModel || '', placeholder: D.envModel ? 'Par défaut : ' + D.envModel : 'Exemple : anthropic/claude-haiku-5-5', autocomplete: 'off', spellcheck: 'false' });
+    const usedModel = s.aiModel || D.envModel;
+    const aiMsg = el('p', { class: 'muted small', id: 'ai-msg' });
+    const saveAi = async () => {
+      const text = rules.value.trim() === D.systemPrompt.trim() ? '' : rules.value;
+      await saveSettings({ aiModel: model.value, systemPrompt: text });
+    };
+    const aiCard = el('div', { class: 'card' }, el('h2', {}, 'Rédaction automatique'),
+      el('p', { class: 'muted' }, 'Choisissez le modèle d\'intelligence artificielle et les consignes qu\'il doit suivre pour écrire vos articles.'),
+      el('label', { for: 'model' }, 'Modèle OpenRouter'), model,
+      el('p', { class: 'muted small' }, usedModel ? `Modèle utilisé aujourd'hui : ${usedModel}${s.aiModel ? '' : ' (celui du serveur)'}.` : 'Aucun modèle choisi pour l\'instant.'),
+      el('p', { class: 'muted small' }, 'Copiez l\'identifiant exact depuis openrouter.ai/models, par exemple anthropic/claude-haiku-5-5. Laissez vide pour utiliser celui du serveur.'),
+      el('label', { for: 'rules' }, 'Consignes de rédaction'), rules, rulesCount,
+      el('div', { class: 'alert mt' }, 'Gardez les règles 2 et 3 (ne jamais inventer de chiffres, ne jamais promettre un classement) : elles évitent d\'afficher de fausses informations sur votre site. Le format de réponse technique est ajouté automatiquement, ne le décrivez pas ici.'),
+      el('div', { class: 'row btn-row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveAi(); render(); toast('Modèle et consignes enregistrés.'); }) }, 'Enregistrer'),
+        el('button', { class: 'btn', type: 'button', onclick: safe(async () => {
+          await saveAi();
+          aiMsg.textContent = 'Test en cours...';
+          try { const r = await api('/ai/test', 'POST'); aiMsg.textContent = r.simulated ? 'Mode démonstration : aucun test réel.' : `Le modèle ${r.model} répond correctement.`; } catch (e) { aiMsg.textContent = ''; throw e; }
+        }) }, 'Tester le modèle'),
+        el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => {
+          if (!confirm('Revenir au texte d\'origine des consignes ? Vos modifications seront perdues.')) return;
+          await saveSettings({ systemPrompt: '' }); render(); toast('Consignes d\'origine rétablies.');
+        }) }, 'Rétablir le texte d\'origine')),
+      aiMsg,
+      el('p', { class: 'muted small' }, 'Sur l\'hébergement gratuit, ces réglages peuvent être réinitialisés lors d\'un redémarrage du serveur : gardez une copie de vos consignes.'));
+
     const wpMsg = el('p', { class: 'muted small', id: 'wp-msg' });
     const conn = (name, what, pill, extra) => el('div', { class: 'conn' }, el('div', { class: 'grow' }, el('b', {}, name), el('div', { class: 'muted small' }, what)), pill, extra || null);
     const wpPill = st.simulate ? el('span', { class: 'pill warn' }, 'Démonstration') : st.wordpress ? el('span', { class: 'pill ok' }, 'Identifiants présents') : el('span', { class: 'pill ko' }, 'Non configuré');
@@ -437,6 +476,7 @@
       el('div', { class: 'card' }, el('h2', {}, 'Votre entreprise'), el('p', { class: 'muted' }, 'Ces informations servent à rédiger les articles.'),
         el('label', { for: 'brand' }, 'Nom commercial'), brand, el('label', { for: 'zone' }, 'Zone desservie'), zone,
         el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveSettings({ brandName: brand.value, zone: zone.value }, 'Informations enregistrées.'); }) }, 'Enregistrer'))),
+      aiCard,
       el('div', { class: 'card' }, el('h2', {}, 'Connexions'), el('p', { class: 'muted' }, 'État des services utilisés par l\'outil.'),
         conn('Votre site WordPress', 'Pour créer et publier les articles', wpPill, wpBtns), el('div', {}, wpMsg),
         conn('Rédaction automatique', 'Le service qui écrit les textes', st.simulate ? el('span', { class: 'pill warn' }, 'Démonstration') : st.openrouter ? el('span', { class: 'pill ok' }, 'Prêt') : el('span', { class: 'pill ko' }, 'Non configuré')),
@@ -454,6 +494,7 @@
       faq('Comment choisir le nombre d\'articles ?', 'Dans « Réglages », déplacez le curseur entre 1 et 8 articles par mois. Ajoutez ensuite vos sujets : un article est préparé par sujet.'),
       faq('Comment relire et publier un article ?', '1. Dans « Articles », cliquez sur « Rédiger les articles du mois ».', '2. Ouvrez un article. Lisez le texte. Les chiffres surlignés en jaune doivent être remplacés par une vraie source, directement dans WordPress.', '3. Quand tout est bon, cochez « J\'ai relu et validé », puis cliquez sur « Publier sur le site ».'),
       faq('Que veut dire « brouillon » ?', 'Un brouillon est un article enregistré sur votre site mais invisible du public. Vous pouvez le modifier tant que vous ne l\'avez pas publié.'),
+      faq('Comment changer le modèle ou les consignes de rédaction ?', 'Dans « Réglages », carte « Rédaction automatique » : indiquez l\'identifiant du modèle (à copier depuis openrouter.ai/models) et modifiez les consignes si besoin, puis cliquez sur « Enregistrer ». Le bouton « Tester le modèle » vérifie en quelques secondes que tout fonctionne.', 'Le bouton « Rétablir le texte d\'origine » remet les consignes de départ.'),
       faq('Que mesure le score ?', 'Un score sur 100 calculé avec des points précis : titres, descriptions, images décrites, liens cassés, pages trop courtes, plan du site, etc. Il vous dit quoi corriger en priorité.', 'Ce n\'est pas une note Google. Il ne mesure ni votre place dans les résultats, ni le nombre de visiteurs. Un bon score ne garantit aucun classement.'),
       faq('Pourquoi un chiffre est-il signalé « à vérifier » ?', 'L\'outil n\'a pas le droit d\'inventer des chiffres. Quand une statistique serait utile, il laisse un repère [SOURCE A VERIFIER] à remplacer par une source fiable, ou à supprimer.'),
       el('div', { class: 'card' }, el('h2', {}, 'Petit lexique'), el('dl', { class: 'gloss' },
