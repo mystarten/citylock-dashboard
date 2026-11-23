@@ -240,3 +240,12 @@ textarea:focus { border-color: var(--accent); outline: 3px solid var(--accent-so
 .seg button.on { background: var(--navy); color: #fff; }
 .row-between { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
 input[readonly] { background: var(--bg); color: var(--muted); }
+
+select { width: 100%; padding: 12px 14px; border: 1.5px solid var(--border); border-radius: 10px; font: inherit; background: #fff; color: var(--text); }
+select:focus { border-color: var(--accent); outline: 3px solid var(--accent-soft); }
+pre.pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font: .85rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-height: 320px; overflow: auto; margin: 6px 0 14px; }
+.trial { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
+.trial .card.post { box-shadow: none; }
+.delta { font-weight: 800; font-size: .85rem; white-space: nowrap; }
+.delta.up { color: var(--ok); } .delta.down { color: var(--ko); }
+.delta.big { font-size: 1rem; margin-top: 4px; }

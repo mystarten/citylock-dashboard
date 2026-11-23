@@ -86,7 +86,9 @@
     ['settings', 'Réglages', 'sliders'],
     ['help', 'Aide', 'help'],
   ];
-  const pending = () => S.articles.filter((a) => a.status !== 'publie').length;
+  const demoOn = () => !!(S.status && S.status.simulate);
+  const mine = () => S.articles.filter((a) => !!a.simulated === demoOn()); // articles du mode en cours
+  const pending = () => mine().filter((a) => a.status !== 'publie').length;
 
   function renderNav() {
     const nav = $('nav');
@@ -98,9 +100,11 @@
     $('logout').replaceChildren(icon('logout'), el('span', {}, 'Se déconnecter'));
   }
 
+  async function refreshPlan() { S.plan = await api('/articles/plan'); }
+
   async function refresh() {
-    const [settings, status, articles, audits, aiDefaults] = await Promise.all([api('/settings'), api('/status'), api('/articles'), api('/audits'), api('/ai/defaults')]);
-    Object.assign(S, { settings, status, articles, audits, aiDefaults });
+    const [settings, status, articles, audits, aiDefaults, plan] = await Promise.all([api('/settings'), api('/status'), api('/articles'), api('/audits'), api('/ai/defaults'), api('/articles/plan')]);
+    Object.assign(S, { settings, status, articles, audits, aiDefaults, plan });
     S.auditRunning = !!audits.status.running;
     $('sim').classList.toggle('hidden', !status.simulate);
   }
@@ -110,10 +114,13 @@
     S.articleId = articleId || null;
     window.scrollTo(0, 0);
     render();
+    if (view === 'articles' || view === 'home') refreshPlan().then(() => { if (S.view === view) render(); }).catch(() => {});
     if (view === 'score') watchAudit();
   }
 
   function render() {
+    // Le bandeau suit TOUJOURS le mode en cours (il disparaît dès que le mode démonstration est désactivé).
+    $('sim').classList.toggle('hidden', !(S.status && S.status.simulate));
     renderNav();
     const main = $('main');
     main.replaceChildren();
@@ -125,11 +132,11 @@
   // ---------- Accueil ----------
   function viewHome() {
     const s = S.settings;
-    const used = S.articles.filter((a) => a.month === monthNow()).length;
+    const used = mine().filter((a) => a.month === monthNow()).length;
     const latest = S.audits.latest;
-    const toReview = S.articles.filter((a) => a.status === 'a_relire').length;
-    const drafts = S.articles.filter((a) => a.status === 'brouillon_wp').length;
-    const usedTopics = new Set(S.articles.filter((a) => a.month === monthNow()).map((a) => a.topicId));
+    const toReview = mine().filter((a) => a.status === 'a_relire').length;
+    const drafts = mine().filter((a) => a.status === 'brouillon_wp').length;
+    const usedTopics = new Set(mine().filter((a) => a.month === monthNow()).map((a) => a.topicId));
     const freeTopics = s.topics.filter((t) => !usedTopics.has(t.id)).length;
 
     let next;
@@ -167,16 +174,100 @@
   // ---------- Articles ----------
   const STATUS = { a_relire: ['À relire', 'warn'], brouillon_wp: ['Brouillon sur le site', 'warn'], publie: ['Publié', 'ok'] };
 
-  function viewArticles() {
+  function planCard() {
+    const pl = S.plan, s = S.settings;
+    const card = el('div', { class: 'card' }, el('h2', {}, 'Ce qui sera rédigé'));
+    if (!pl.totalTopics) {
+      add(card, el('p', { class: 'muted' }, 'Aucun sujet pour l\'instant. Les sujets sont la base de chaque article : ajoutez les vôtres dans les réglages.'),
+        el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: () => { S.settingsTab = 'general'; go('settings'); } }, 'Ajouter des sujets')));
+    } else if (pl.remaining <= 0) {
+      add(card, el('p', {}, `Le lot du mois est complet : ${pl.already} ${plural(pl.already, 'article rédigé', 'articles rédigés')} sur ${pl.frequency}.`),
+        pl.availableTopics ? el('p', { class: 'muted small' }, `${pl.availableTopics} ${plural(pl.availableTopics, 'sujet attend', 'sujets attendent')} le mois prochain.`) : null);
+    } else if (!pl.next.length) {
+      add(card, el('p', {}, 'Tous vos sujets ont déjà été utilisés ce mois-ci. Ajoutez de nouveaux sujets dans les réglages pour continuer.'),
+        el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: () => { S.settingsTab = 'general'; go('settings'); } }, 'Ajouter des sujets')));
+    } else {
+      add(card, el('p', { class: 'muted' }, `Ce mois-ci : ${pl.already} sur ${pl.frequency} rédigés. Le prochain lot rédigera ${pl.next.length} ${plural(pl.next.length, 'article', 'articles')}, un par sujet, dans cet ordre :`),
+        el('ol', { class: 'tasks' }, pl.next.map((t) => el('li', {}, el('b', {}, t.keyword), t.city ? ' à ' + t.city : ''))),
+        pl.availableTopics > pl.next.length ? el('p', { class: 'muted small' }, `${pl.availableTopics - pl.next.length} ${plural(pl.availableTopics - pl.next.length, 'autre sujet attend', 'autres sujets attendent')} le mois prochain.`) : null);
+    }
+    if (demoOn()) add(card, el('p', { class: 'muted small' }, 'Mode démonstration : les articles seront des textes de test, rien ne part sur votre site.'));
+    return card;
+  }
+
+  // Essai de rédaction : un article « pour voir », sans envoi sur le site ni usage du quota tant qu'on ne le garde pas.
+  function trialCard() {
     const s = S.settings;
-    const used = S.articles.filter((a) => a.month === monthNow()).length;
-    const b = S.batch;
-    const out = [head('Articles', `Objectif du mois : ${s.frequency} ${plural(s.frequency, 'article', 'articles')}. Déjà préparés : ${used}.`,
-      el('button', { class: 'btn primary big', type: 'button', disabled: b.running ? true : false, onclick: safe(startBatch) }, icon('spark'), 'Rédiger les articles du mois'))];
+    const sel = el('select', { id: 'trial-topic', 'aria-label': 'Sujet de l\'essai' },
+      [...s.topics.map((t) => el('option', { value: t.id }, t.keyword + (t.city ? ' à ' + t.city : ''))), el('option', { value: '__free' }, 'Autre sujet (je le tape)')]);
+    sel.value = S.trialSel && [...sel.options].some((o) => o.value === S.trialSel) ? S.trialSel : sel.options[0].value;
+    const kw = el('input', { type: 'text', id: 'trial-kw', maxlength: 100, placeholder: 'Mot-clé, par exemple : serrure connectée', 'aria-label': 'Mot-clé' });
+    const city = el('input', { type: 'text', id: 'trial-city', maxlength: 60, placeholder: 'Ville (facultatif)', 'aria-label': 'Ville' });
+    kw.value = S.trialKw || ''; city.value = S.trialCity || '';
+    const free = el('div', { class: 'row mt' }, kw, city);
+    const sync = () => { S.trialSel = sel.value; S.trialKw = kw.value; S.trialCity = city.value; free.classList.toggle('hidden', sel.value !== '__free'); };
+    [sel, kw, city].forEach((n) => n.addEventListener('input', sync)); sel.addEventListener('change', sync); sync();
+
+    const run = el('button', { class: 'btn primary', type: 'button', disabled: S.trialBusy ? true : false, onclick: safe(async () => {
+      sync(); S.trialBusy = true; S.trial = null; S.trialErr = ''; render();
+      try { S.trial = await api('/articles/test', 'POST', sel.value === '__free' ? { keyword: kw.value, city: city.value } : { topicId: sel.value }); }
+      catch (e) { S.trialErr = e.message; }
+      S.trialBusy = false; render();
+    }) }, icon('spark'), S.trialBusy ? 'Rédaction en cours...' : 'Rédiger un essai');
+
+    const card = el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Essayer un article'), el('button', { class: 'btn ghost', type: 'button', onclick: () => { S.trialOpen = false; S.trial = null; render(); } }, 'Fermer')),
+      el('p', { class: 'muted' }, 'Rédige un article d\'essai pour juger la qualité, sans rien envoyer sur votre site et sans toucher au lot du mois. Il utilise le modèle et les consignes des réglages.'),
+      el('label', { for: 'trial-topic' }, 'Sujet de l\'essai'), sel, free,
+      el('div', { class: 'row btn-row' }, run),
+      el('p', { class: 'muted small' }, demoOn() ? 'Mode démonstration : texte de test, aucun appel réel.' : 'Un essai coûte un appel à l\'IA (quelques centimes). Limite : 10 essais par jour.'));
+    if (S.trialBusy) add(card, el('p', { class: 'muted small' }, 'Cela peut prendre jusqu\'à une minute. Vous pouvez rester sur cette page.'));
+    if (S.trialErr) add(card, el('div', { class: 'alert mt' }, S.trialErr));
+    if (S.trial) add(card, trialResult(S.trial));
+    return card;
+  }
+
+  function trialResult(t) {
+    const a = t.article;
+    const preview = el('div', { class: 'preview' });
+    preview.innerHTML = a.htmlContent; // HTML assaini côté serveur
+    highlightMarkers(preview);
+    const sent = t.sent || {};
+    const markers = (a.htmlContent.match(/\[SOURCE A VERIFIER\]/g) || []).length;
+    const box = el('div', { class: 'trial' },
+      el('div', { class: 'row-between' }, el('h3', {}, 'Résultat de l\'essai'), el('span', { class: 'pill ' + (t.simulated ? 'warn' : 'ok') }, t.simulated ? 'Texte de démonstration' : 'Rédigé par l\'IA')),
+      el('p', { class: 'muted small' }, `Sujet : ${t.topic.keyword}${t.topic.city ? ' à ' + t.topic.city : ''} · ${a.wordCount} mots · titre Google (${a.metaTitle.length}/60) · description (${a.metaDescription.length}/155)`),
+      el('div', { class: 'card post' }, el('h2', {}, a.title), preview),
+      markers ? el('div', { class: 'alert' }, `${markers} ${plural(markers, 'chiffre à sourcer', 'chiffres à sourcer')} (surlignés en jaune) : l'IA n'a pas le droit d'inventer, c'est normal.`) : null,
+      a.warnings && a.warnings.length ? el('ul', { class: 'tasks' }, a.warnings.map((w) => el('li', {}, w))) : null,
+      el('details', { class: 'faq' }, el('summary', {}, 'Ce qui a été envoyé à l\'IA'), el('div', { class: 'a' },
+        el('p', { class: 'muted small' }, (t.simulated ? 'Mode démonstration : voici ce qui serait envoyé, rien n\'est réellement envoyé. ' : '') + 'Modèle : ' + (sent.model || '(aucun choisi)')),
+        el('h3', {}, 'Message sur l\'entreprise et le sujet'), el('pre', { class: 'pre' }, sent.user || ''),
+        el('h3', {}, 'Consignes de rédaction (modifiables dans Réglages, Rédaction)'), el('pre', { class: 'pre' }, sent.system || ''))),
+      el('div', { class: 'row btn-row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => {
+          const r = await api('/articles/test/keep', 'POST', { trialId: t.trialId });
+          S.trial = null; S.trialOpen = false; await refresh();
+          toast(r.autoDraftError ? 'Article gardé, mais l\'envoi sur le site a échoué : ' + r.autoDraftError : 'Article gardé dans vos articles.', !!r.autoDraftError);
+          go('article', r.article.id);
+        }) }, 'Garder dans mes articles'),
+        el('button', { class: 'btn', type: 'button', onclick: () => { S.trial = null; render(); } }, 'Ne pas garder')),
+      el('p', { class: 'muted small' }, 'Si vous le gardez, il compte dans le lot du mois' + (t.trialsLeft != null && !t.simulated ? ` (il reste ${t.trialsLeft} essais aujourd'hui).` : '.')));
+    return box;
+  }
+
+  function viewArticles() {
+    const s = S.settings, b = S.batch, pl = S.plan;
+    const demoCount = S.articles.filter((a) => a.simulated).length;
+    const out = [head('Articles', `Objectif du mois : ${s.frequency} ${plural(s.frequency, 'article', 'articles')}. Déjà rédigés : ${pl.already}.`,
+      el('div', { class: 'row' },
+        el('button', { class: 'btn big', type: 'button', onclick: () => { S.trialOpen = !S.trialOpen; render(); } }, icon('file'), 'Essayer un article'),
+        el('button', { class: 'btn primary big', type: 'button', disabled: b.running || pl.remaining <= 0 || !pl.next.length ? true : false, onclick: safe(startBatch) }, icon('spark'), 'Rédiger les articles du mois')))];
 
     out.push(el('div', { class: 'alert' + (s.autoDraft ? ' ok' : '') }, s.autoDraft
       ? 'Chaque article rédigé est envoyé automatiquement sur votre site en brouillon. Rien n\'est publié sans votre accord.'
       : 'Les articles restent ici jusqu\'à ce que vous les envoyiez vous-même sur le site.'));
+    if (S.trialOpen) out.push(trialCard());
+    out.push(planCard());
 
     if (b.running) {
       out.push(el('div', { class: 'card' }, el('h2', {}, 'Rédaction en cours...'),
@@ -185,16 +276,20 @@
     }
     if (!b.running && b.errors.length) out.push(el('div', { class: 'card' }, el('h2', {}, 'Certains articles n\'ont pas pu être préparés'), el('ul', { class: 'tasks' }, b.errors.map((e) => el('li', {}, e)))));
 
+    if (!demoOn() && demoCount) out.push(el('div', { class: 'alert' }, `${demoCount} ${plural(demoCount, 'article de démonstration reste', 'articles de démonstration restent')} dans la liste (créés avant le passage en mode réel). Ils n'existent pas sur votre site. `,
+      el('button', { class: 'btn', type: 'button', onclick: safe(async () => { if (!confirm('Supprimer les articles de démonstration ? Cela ne touche pas à votre site.')) return; const r = await api('/articles/purge-demo', 'POST'); await refresh(); render(); toast(`${r.removed} supprimé${r.removed > 1 ? 's' : ''}.`); }) }, 'Les supprimer')));
+    if (demoOn() && S.articles.some((a) => !a.simulated)) out.push(el('div', { class: 'alert' }, 'Vos articles réels sont visibles, mais ne peuvent être ni publiés ni supprimés tant que le mode démonstration est actif.'));
+
     const list = el('div', {});
     if (!S.articles.length) {
       list.append(el('div', { class: 'card empty' }, icon('file'), el('h3', {}, 'Aucun article pour l\'instant'),
-        el('p', { class: 'muted' }, s.topics.length ? 'Cliquez sur « Rédiger les articles du mois » pour commencer.' : 'Ajoutez d\'abord des sujets dans les réglages.'),
-        s.topics.length ? null : el('p', {}, el('button', { class: 'btn primary', type: 'button', onclick: () => go('settings') }, 'Aller aux réglages'))));
+        el('p', { class: 'muted' }, s.topics.length ? 'Cliquez sur « Rédiger les articles du mois », ou sur « Essayer un article » pour juger la qualité d\'abord.' : 'Ajoutez d\'abord des sujets dans les réglages.')));
     } else {
       S.articles.forEach((a) => {
         const [label, tone] = STATUS[a.status] || [a.status, ''];
         list.append(el('button', { class: 'art-row', type: 'button', onclick: () => go('article', a.id) },
           el('div', { class: 'grow' }, el('div', { class: 't' }, a.title), el('div', { class: 'm' }, a.keyword + (a.city ? ' à ' + a.city : '') + ' · ' + a.wordCount + ' mots · ' + fmtDate(a.createdAt))),
+          a.simulated ? el('span', { class: 'pill' }, 'Démonstration') : null,
           el('span', { class: 'pill ' + tone }, label)));
       });
     }
@@ -230,9 +325,12 @@
     highlightMarkers(preview);
 
     const wp = safeUrl(a.wpLink);
+    const mismatch = !!a.simulated !== demoOn(); // créé dans l'autre mode (démonstration/réel)
     const actions = el('div', { class: 'card sticky' });
     const reload = async () => { await refresh(); render(); };
-    if (a.status === 'a_relire') {
+    if (mismatch && a.status !== 'publie') {
+      add(actions, el('div', { class: 'alert' }, `Cet article a été créé en mode ${a.simulated ? 'démonstration' : 'réel'}. Pour le ${a.status === 'a_relire' ? 'envoyer' : 'publier'}, repassez en mode ${a.simulated ? 'démonstration' : 'réel'} (Réglages, Connexions).`));
+    } else if (a.status === 'a_relire') {
       add(actions, el('div', { class: 'eyebrow' }, 'Étape suivante'), el('h2', {}, 'Envoyer sur votre site'),
         el('p', { class: 'muted small' }, 'L\'article arrive en brouillon dans WordPress. Il n\'est pas visible du public.'),
         el('div', { class: 'actions' }, el('button', { class: 'btn primary big', type: 'button', onclick: safe(async () => { await api(`/articles/${a.id}/send`, 'POST'); toast('Brouillon créé sur votre site.'); await reload(); }) }, icon('send'), 'Envoyer en brouillon')));
@@ -249,7 +347,7 @@
     } else {
       add(actions, el('div', { class: 'alert ok' }, 'Cet article est publié sur votre site.'), wp ? el('p', {}, el('a', { class: 'btn', href: wp, target: '_blank', rel: 'noopener noreferrer' }, icon('ext'), 'Voir l\'article')) : null);
     }
-    if (a.status !== 'publie') {
+    if (a.status !== 'publie' && (a.simulated || !mismatch)) {
       add(actions, el('div', { class: 'actions' }, el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => {
         if (!confirm(a.status === 'brouillon_wp' ? 'Supprimer ce brouillon, aussi sur votre site ?' : 'Supprimer cet article ?')) return;
         await api('/articles/' + a.id, 'DELETE'); toast('Article supprimé.'); await refresh(); go('articles');
@@ -302,7 +400,7 @@
   // ---------- Score ----------
   const PLAIN = {
     title: 'Titres des pages', meta: 'Descriptions sous les résultats Google', h1: 'Un titre principal par page', alt: 'Images décrites',
-    localbusiness: 'Fiche entreprise lisible par Google', broken: 'Liens qui ne marchent plus', orphans: 'Pages que personne ne relie',
+    localbusiness: 'Entreprise locale déclarée sur l\'accueil (pas la fiche Google)', broken: 'Liens qui ne marchent plus', orphans: 'Pages que personne ne relie',
     thin: 'Pages trop courtes', robots: 'Plan du site déclaré aux moteurs', offtopic: 'Pages de test à supprimer', speed: 'Vitesse sur mobile',
   };
 
@@ -318,6 +416,19 @@
     return wrap;
   }
 
+  const METHOD = [['title', 10], ['meta', 10], ['h1', 10], ['alt', 10], ['localbusiness', 10], ['broken', 10], ['orphans', 10], ['thin', 10], ['robots', 5], ['offtopic', 5], ['speed', 10]];
+  function methodCard() {
+    return el('div', { class: 'card' }, el('h2', {}, 'Sur quoi repose ce score ?'),
+      el('p', {}, 'Le robot de l\'outil lit les vraies pages publiques de votre site (celles du plan du site, 150 au maximum), comme le ferait un moteur de recherche. Il applique ensuite 11 vérifications précises, chacune avec ses points. Le score est le total obtenu divisé par le total possible, sur 100.'),
+      el('table', { class: 't' }, el('tr', {}, el('th', {}, 'Vérification'), el('th', {}, 'Points')), METHOD.map(([id, pts]) => el('tr', {}, el('td', {}, PLAIN[id]), el('td', {}, pts + (id === 'speed' ? ' (si clé PageSpeed)' : ''))))),
+      el('h3', { class: 'mt' }, 'Ce que le score mesure'),
+      el('p', { class: 'muted' }, 'L\'hygiène technique de votre site : des faits vérifiables page par page (un titre, une description, un titre principal, des images décrites, des liens qui marchent…). C\'est réel et reproductible : deux mesures d\'un site inchangé donnent le même résultat.'),
+      el('h3', {}, 'Ce qu\'il ne mesure pas'),
+      el('p', { class: 'muted' }, 'Votre position dans Google, votre nombre de visiteurs, la qualité de vos textes, vos liens depuis d\'autres sites, ni votre fiche Google Business Profile. Un bon score ne garantit aucun classement : il enlève des obstacles techniques.'),
+      el('h3', {}, 'Suivre la progression'),
+      el('p', { class: 'muted' }, 'Comparez des mesures faites dans les mêmes conditions. Ajouter ou supprimer des pages, ou ajouter la clé PageSpeed, change le total possible et peut faire bouger le score sans vraie amélioration. L\'écran signale ce cas. Sur l\'hébergement gratuit, l\'historique est effacé à chaque redémarrage : téléchargez-le régulièrement (CSV).'));
+  }
+
   function viewScore() {
     const d = S.audits;
     const a = d.latest;
@@ -330,33 +441,52 @@
       a ? ring(a.score) : el('div', { class: 'empty' }, icon('gauge')),
       el('div', {}, a ? el('h2', {}, label) : el('h2', {}, 'Pas encore de mesure'),
         el('p', { class: 'muted' }, a ? `Mesuré le ${fmtDate(a.date)} sur ${a.pagesCount} pages${a.truncated ? ' (les premières seulement)' : ''}.` : 'Cliquez sur le bouton pour analyser votre site. Cela prend environ une minute.'),
+        a ? progressLine(d) : null,
         el('div', { class: 'actions' }, runBtn),
         d.status.lastError && !S.auditRunning ? el('p', { class: 'form-error' }, 'La dernière mesure a échoué : ' + d.status.lastError) : null)));
 
-    if (!a) return out;
+    if (!a) { out.push(methodCard()); return out; }
 
     const top = el('div', { class: 'card' }, el('h2', {}, 'À faire en priorité'), el('p', { class: 'muted' }, 'Les 5 actions qui font gagner le plus de points.'));
     if (a.improvements.length) a.improvements.forEach((i) => top.append(el('div', { class: 'todo' }, el('span', { class: 'gain' }, '+' + i.gain + ' pt'), el('div', {}, el('h3', {}, PLAIN[i.id] || i.label), el('p', { class: 'muted small' }, i.explanation)))));
     else top.append(el('p', {}, 'Rien à améliorer sur les points mesurés.'));
     out.push(top);
 
-    out.push(el('div', { class: 'card' }, el('h2', {}, 'Évolution'), el('div', { id: 'chart' }, chart(d.history.slice(-26))),
+    out.push(el('div', { class: 'card' }, el('h2', {}, 'Évolution'), el('p', { class: 'muted' }, d.history.length > 1 ? `${d.history.length} mesures conservées.` : 'Une seule mesure pour l\'instant : la courbe apparaît à partir de deux mesures.'), el('div', { id: 'chart' }, chart(d.history.slice(-26))),
       el('table', { class: 't' }, el('tr', {}, el('th', {}, 'Date'), el('th', {}, 'Score'), el('th', {}, 'Lancement')),
-        d.history.slice().reverse().slice(0, 10).map((h) => el('tr', {}, el('td', {}, fmtDate(h.date)), el('td', {}, h.score + ' / 100'), el('td', {}, h.trigger))))));
+        d.history.slice().reverse().slice(0, 10).map((h) => el('tr', {}, el('td', {}, fmtDate(h.date)), el('td', {}, h.score + ' / 100'), el('td', {}, h.trigger)))),
+      el('div', { class: 'actions' }, el('a', { class: 'btn', href: '/api/audits/export.csv', download: 'historique-score-seo.csv' }, 'Télécharger l\'historique (CSV)')),
+      el('p', { class: 'muted small' }, 'Sur l\'hébergement gratuit sans disque, l\'historique est effacé à chaque redémarrage du serveur. Le fichier CSV vous permet d\'en garder une trace durable.')));
 
     const crits = el('div', { class: 'card' }, el('h2', {}, 'Détail, point par point'), el('p', { class: 'muted' }, 'Cliquez sur une ligne pour voir pourquoi et quoi faire.'));
+    const prevMap = new Map((d.previous ? d.previous.criteria : []).map((x) => [x.id, x]));
     a.criteria.forEach((c) => {
       const nm = c.points == null;
+      const pc = prevMap.get(c.id);
+      const dv = pc && pc.points != null && c.points != null ? Math.round((c.points - pc.points) * 10) / 10 : 0;
       const tone = nm ? 'nm' : c.points >= c.max ? 'ok' : c.points === 0 ? 'ko' : 'mid';
       crits.append(el('details', { class: 'crit' },
         el('summary', {}, el('span', { class: 'dot-s ' + tone }, icon(tone === 'ok' ? 'check' : tone === 'nm' ? 'alert' : 'x')),
           el('span', { class: 'name' }, PLAIN[c.id] || c.label),
+          dv ? el('span', { class: 'delta ' + (dv > 0 ? 'up' : 'down') }, (dv > 0 ? '+' : '') + String(dv).replace('.', ',')) : null,
           el('span', { class: 'pill ' + (tone === 'ok' ? 'ok' : tone === 'nm' ? '' : tone === 'ko' ? 'ko' : 'warn') }, nm ? 'Non mesuré' : `${c.points} / ${c.max}`)),
         el('div', { class: 'body' }, el('p', { class: 'muted small' }, c.label), el('p', {}, el('b', {}, 'Constat : '), c.measured), el('p', {}, c.explanation),
           c.details && c.details.length ? el('ul', {}, c.details.map((x) => el('li', {}, x.url + ' : ' + x.why))) : null)));
     });
     out.push(crits);
+    out.push(methodCard());
     return out;
+  }
+
+  // Variation depuis la mesure précédente, avec avertissement si les critères mesurés ont changé.
+  function progressLine(d) {
+    const a = d.latest, prev = d.previous;
+    if (!prev) return el('p', { class: 'muted small' }, 'La progression s\'affichera dès la prochaine mesure.');
+    const diff = a.score - prev.score;
+    const ids = (list) => list.filter((c) => c.points != null).map((c) => c.id).sort().join(',');
+    const same = ids(a.criteria) === ids(prev.criteria);
+    return el('div', {}, el('p', { class: 'delta big ' + (diff > 0 ? 'up' : diff < 0 ? 'down' : '') }, diff === 0 ? 'Stable depuis le ' + fmtDate(prev.date) : `${diff > 0 ? '+' : '−'}${Math.abs(diff)} ${Math.abs(diff) > 1 ? 'points' : 'point'} depuis le ${fmtDate(prev.date)} (${prev.score} → ${a.score})`.replace(' → ', ' vers ')),
+      same ? null : el('p', { class: 'muted small' }, 'Attention : les critères mesurés ne sont pas les mêmes que la fois précédente (par exemple la vitesse). La comparaison est moins fiable.'));
   }
 
   function chart(points) {
@@ -399,6 +529,7 @@
     for (const k of ['aiModel', 'systemPrompt', 'simulate']) if (k in patch) payload[k] = patch[k];
     S.settings = await api('/settings', 'PUT', payload);
     S.status = await api('/status');
+    await refreshPlan();
     if (msg) toast(msg);
   }
   // Clés et identifiants : on peut les remplacer ou les effacer, jamais les relire.
@@ -445,7 +576,7 @@
     const topics = el('div', { class: 'chips' });
     if (!s.topics.length) topics.append(el('p', { class: 'muted' }, 'Aucun sujet pour l\'instant.'));
     s.topics.forEach((tp) => topics.append(el('div', { class: 'chip' }, el('div', { class: 'grow' }, el('b', {}, tp.keyword), tp.city ? ' à ' + tp.city : ''),
-      el('button', { type: 'button', 'aria-label': 'Supprimer ce sujet', onclick: safe(async () => { S.settings = await api('/topics/' + tp.id, 'DELETE'); render(); }) }, icon('trash')))));
+      el('button', { type: 'button', 'aria-label': 'Supprimer ce sujet', onclick: safe(async () => { S.settings = await api('/topics/' + tp.id, 'DELETE'); await refreshPlan(); render(); }) }, icon('trash')))));
 
     const brand = el('input', { type: 'text', maxlength: 60, value: s.brandName, id: 'brand' });
     const zone = el('input', { type: 'text', maxlength: 80, value: s.zone, id: 'zone' });
@@ -455,7 +586,7 @@
     return [
       el('div', { class: 'card' }, el('h2', {}, 'Combien d\'articles par mois ?'), el('p', { class: 'muted' }, 'Déplacez le curseur. L\'outil ne rédigera jamais plus que ce nombre.'), big, freq, el('div', { class: 'scale' }, el('span', {}, '1'), el('span', {}, '8')), hint),
       el('div', { class: 'card' }, el('h2', {}, 'Vos sujets d\'articles'), el('p', { class: 'muted' }, 'Un sujet = un mot-clé que vous voulez travailler, avec une ville si utile.'),
-        el('form', { class: 'row', onsubmit: safe(async (e) => { e.preventDefault(); S.settings = await api('/topics', 'POST', { keyword: kw.value, city: city.value }); render(); }) }, kw, city, el('button', { class: 'btn primary', type: 'submit' }, icon('plus'), 'Ajouter')), topics),
+        el('form', { class: 'row', onsubmit: safe(async (e) => { e.preventDefault(); S.settings = await api('/topics', 'POST', { keyword: kw.value, city: city.value }); await refreshPlan(); render(); }) }, kw, city, el('button', { class: 'btn primary', type: 'submit' }, icon('plus'), 'Ajouter')), topics),
       el('div', { class: 'card' }, el('h2', {}, 'Publication sur le site'),
         el('div', { class: 'switch-row' }, el('div', {}, el('b', {}, 'Envoyer chaque article en brouillon, automatiquement'), el('p', { class: 'muted small' }, 'Le brouillon n\'est pas visible du public. Vous publiez vous-même, après relecture.')),
           el('label', { class: 'switch', for: 'auto', 'aria-label': 'Envoi automatique en brouillon' }, auto, el('span')))),
@@ -603,6 +734,9 @@
       faq('Que veut dire « brouillon » ?', 'Un brouillon est un article enregistré sur votre site mais invisible du public. Vous pouvez le modifier tant que vous ne l\'avez pas publié.'),
       faq('Comment relier mon site WordPress ?', 'Dans « Réglages », onglet « Connexions », suivez la carte « Liaison avec WordPress » : un administrateur crée un mot de passe d\'application dans WordPress, puis vous collez l\'identifiant et ce mot de passe, et vous cliquez sur « Enregistrer et tester ». Un message vert confirme que ça marche.', 'La carte « Mise en route » en haut de l\'onglet vous indique ce qu\'il reste à faire.'),
       faq('Comment changer le modèle ou les consignes de rédaction ?', 'Dans « Réglages », onglet « Rédaction » : collez la clé OpenRouter, indiquez l\'identifiant du modèle (à copier depuis openrouter.ai/models) et modifiez les consignes si besoin, puis cliquez sur « Enregistrer et tester ». Le bouton « Rétablir le texte d\'origine » remet les consignes de départ.'),
+      faq('À quoi sert « Essayer un article » ?', 'Dans « Articles », ce bouton rédige un article d\'essai pour juger la qualité, sans rien envoyer sur votre site et sans toucher au lot du mois. Vous voyez le texte, les chiffres à vérifier, et exactement ce qui a été envoyé à l\'IA (sujet, ville, consignes). Si le résultat vous plaît, « Garder dans mes articles » le range dans la liste.'),
+      faq('Les sujets sont-ils bien pris en compte ?', 'Oui : dans « Articles », la carte « Ce qui sera rédigé » liste les sujets du prochain lot, dans l\'ordre. Chaque article est rédigé pour un sujet (mot-clé et ville). Un sujet déjà utilisé ce mois-ci n\'est pas repris avant le mois suivant.'),
+      faq('Pourquoi « entreprise locale » est à 0 alors que ma fiche Google est complète ?', 'Ce sont deux choses différentes. La fiche Google Business Profile (horaires, avis, photos, services) est gérée sur Google. Le score, lui, lit le code de la page d\'accueil de votre site, et cherche une déclaration « entreprise locale » (LocalBusiness). Elle peut manquer même si votre fiche Google est parfaite. Le détail du critère indique les types trouvés sur votre accueil.'),
       faq('Que mesure le score ?', 'Un score sur 100 calculé avec des points précis : titres, descriptions, images décrites, liens cassés, pages trop courtes, plan du site, etc. Il vous dit quoi corriger en priorité.', 'Ce n\'est pas une note Google. Il ne mesure ni votre place dans les résultats, ni le nombre de visiteurs. Un bon score ne garantit aucun classement.'),
       faq('Pourquoi un chiffre est-il signalé « à vérifier » ?', 'L\'outil n\'a pas le droit d\'inventer des chiffres. Quand une statistique serait utile, il laisse un repère [SOURCE A VERIFIER] à remplacer par une source fiable, ou à supprimer.'),
       el('div', { class: 'card' }, el('h2', {}, 'Petit lexique'), el('dl', { class: 'gloss' },

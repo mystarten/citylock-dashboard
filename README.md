@@ -92,6 +92,17 @@ Tout se gère dans **Réglages**, sans redéployer :
 - **Limite importante** : toute personne qui se connecte au tableau de bord peut remplacer ces clés. Le mot de passe de connexion doit donc être long, et ne se partage qu'avec les personnes de confiance.
 - **Hébergement gratuit sans disque** : les clés et réglages saisis dans l'interface sont effacés à chaque redémarrage. Gardez aussi les clés dans les variables de l'hébergeur (elles servent de secours) ou prenez un disque persistant.
 
+## Essayer un article et vérifier les sujets
+
+- **Articles > « Ce qui sera rédigé »** : liste les sujets du prochain lot, dans l'ordre, limités à la fréquence réglée. Un sujet déjà utilisé ce mois-ci n'est pas repris avant le mois suivant.
+- **Articles > « Essayer un article »** : rédige un article d'essai pour un sujet de la liste ou un sujet libre. Rien n'est envoyé à WordPress et le lot du mois n'est pas touché, sauf si on clique sur « Garder dans mes articles ». L'écran montre aussi **exactement ce qui est envoyé à l'IA** (modèle, sujet, ville, consignes). Limites : 1 essai toutes les 3 secondes, 10 par jour (un essai coûte un appel payant à l'IA).
+
+## Mode démonstration et mode réel
+
+- Un interrupteur dans Réglages > Connexions (une confirmation est demandée pour passer en réel). Le bandeau « Mode démonstration » disparaît dès que le mode est désactivé.
+- En mode réel : les articles sont rédigés par l'IA, envoyés en brouillon dans WordPress, et **peuvent être vraiment publiés** (case « J'ai relu et validé » obligatoire, et refus tant que `[SOURCE A VERIFIER]` reste dans le texte sur WordPress).
+- Chaque article porte la marque du mode dans lequel il a été créé. Un article de démonstration n'existe pas sur le site : il ne peut pas être publié en mode réel, il ne compte pas dans le quota du lot réel, et un bouton permet de tous les supprimer sans toucher à WordPress. Inversement, un vrai brouillon ne peut ni être « publié » ni supprimé tant que le mode démonstration est actif.
+
 ## Modèle et consignes modifiables depuis l'interface
 
 Dans Réglages, onglet « Rédaction » :
@@ -126,6 +137,19 @@ Total de 100 points, 11 critères exactement comme demandé. Précisions :
 - Améliorations : critères classés par points perdus, les 5 plus gros en premier.
 
 Audit automatique : lundi 8 h (Europe/Paris) via node-cron, tant que le serveur tourne. Historique conservé : 104 audits.
+
+### Sur quoi repose le score, et ce qu'il ne mesure pas
+
+Le robot lit les vraies pages publiques du site (celles du plan du site, 150 au maximum) et applique 11 vérifications chiffrées. Le résultat est reproductible : deux mesures d'un site inchangé donnent le même score. C'est un score d'**hygiène technique**, pas une note Google : il ne mesure ni le classement, ni le trafic, ni la qualité des textes, ni les liens venant d'autres sites, ni la fiche Google Business Profile.
+
+**Critère « entreprise locale » (10 points)** : il lit le **code de la page d'accueil du site** et cherche une déclaration LocalBusiness (données structurées JSON-LD). Il est indépendant de la fiche Google Business Profile : une fiche parfaite peut cohabiter avec 0/10 ici. Le constat liste les types réellement trouvés sur l'accueil (par exemple « Organization, WebSite »). Une extension SEO qui ne déclare que « Organization » ne suffit pas.
+
+### Suivre la progression dans le temps
+
+- L'écran Score affiche la variation depuis la mesure précédente (« +7 points depuis le 10 novembre »), la variation par critère, la courbe et le tableau.
+- La comparaison n'est fiable qu'à conditions égales. Si les critères mesurés changent (par exemple ajout de la clé PageSpeed), un avertissement s'affiche. Ajouter ou supprimer des pages peut aussi faire bouger le score sans vraie amélioration.
+- **Sans disque persistant, l'historique est effacé à chaque redémarrage** (hébergement gratuit) : il n'y a alors pas de suivi sur plusieurs mois. Deux parades : un disque persistant (payant), ou télécharger régulièrement l'historique en CSV (bouton sous la courbe).
+
 
 ## Sécurité
 

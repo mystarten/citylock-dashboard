@@ -183,6 +183,32 @@ app.post('/api/category/ensure', wrap(async (req, res) => {
 const monthNow = () => new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7);
 const batch = { running: false, total: 0, done: 0, errors: [] };
 const articleView = (a) => a;
+
+// Quota et sujets : on ne compte que les articles du mode en cours (démonstration ou réel),
+// pour que des articles de démonstration ne bloquent jamais le premier vrai lot.
+function planNow() {
+  const s = store.getSettings();
+  const month = monthNow();
+  const mode = isSimulated();
+  const already = store.getArticles().filter((a) => a.month === month && !!a.simulated === mode);
+  const remaining = Math.max(0, s.frequency - already.length);
+  const used = new Set(already.map((a) => a.topicId));
+  const available = s.topics.filter((t) => !used.has(t.id));
+  return {
+    month, simulate: mode, frequency: s.frequency, already: already.length, remaining,
+    totalTopics: s.topics.length, availableTopics: available.length,
+    next: available.slice(0, remaining).map((t) => ({ id: t.id, keyword: t.keyword, city: t.city })),
+  };
+}
+const modeName = (sim) => (sim ? 'démonstration' : 'réel');
+function assertSameMode(a, action) {
+  if (!!a.simulated !== isSimulated()) throw fail(409, `Cet article a été créé en mode ${modeName(!!a.simulated)}. Repassez en mode ${modeName(!!a.simulated)} (Réglages, Connexions) pour le ${action}, ou supprimez-le.`);
+}
+const lastAuditPages = () => { const a = store.getAudits(); const l = a[a.length - 1]; return l && l.sitemapUrls ? l.sitemapUrls.slice(0, 40) : []; };
+const makeRecord = (topic, art, month) => ({
+  id: crypto.randomUUID(), topicId: topic.id || null, keyword: topic.keyword, city: topic.city || '', month,
+  createdAt: new Date().toISOString(), status: 'a_relire', wpId: null, wpLink: null, simulated: isSimulated(), ...art,
+});
 async function pushDraft(a) {
   const s = store.getSettings();
   let cat = s.blogCategoryId;
@@ -199,18 +225,24 @@ const findArticle = (id) => {
 };
 
 app.get('/api/articles', (req, res) => res.json(store.getArticles().map(articleView).reverse()));
+app.get('/api/articles/plan', (req, res) => res.json(planNow()));
+
+// Supprime les articles de démonstration (localement seulement : ils n'existent pas vraiment sur le site).
+app.post('/api/articles/purge-demo', wrap((req, res) => {
+  const list = store.getArticles();
+  const keep = list.filter((a) => !a.simulated);
+  store.saveArticles(keep);
+  res.json({ removed: list.length - keep.length });
+}));
 
 app.post('/api/articles/batch', wrap((req, res) => {
   if (batch.running) throw fail(409, 'Un lot est déjà en cours de rédaction.');
   const s = store.getSettings();
   const month = monthNow();
-  const articles = store.getArticles();
-  const already = articles.filter((a) => a.month === month);
-  const remaining = s.frequency - already.length;
-  if (remaining <= 0) throw fail(409, `Le lot du mois est complet (${already.length} article(s) pour une fréquence de ${s.frequency}). Supprimez un article ou augmentez la fréquence.`);
-  const usedTopics = new Set(already.map((a) => a.topicId));
-  const todo = s.topics.filter((t) => !usedTopics.has(t.id)).slice(0, remaining);
-  if (!todo.length) throw fail(400, 'Aucun sujet validé disponible. Ajoutez des sujets dans l\'écran Réglages.');
+  const pl = planNow();
+  if (pl.remaining <= 0) throw fail(409, `Le lot du mois est complet (${pl.already} article(s) pour une fréquence de ${s.frequency}). Supprimez un article ou augmentez la fréquence.`);
+  const todo = pl.next;
+  if (!todo.length) throw fail(400, pl.totalTopics ? 'Tous vos sujets ont déjà été utilisés ce mois-ci. Ajoutez de nouveaux sujets dans Réglages.' : 'Aucun sujet validé disponible. Ajoutez des sujets dans Réglages.');
   if (!isSimulated()) {
     if (!secrets.get('openrouterKey')) throw fail(400, 'La clé OpenRouter n\'est pas configurée. Saisissez-la dans Réglages, Rédaction.');
     if (!ai.effectiveModel(s)) throw fail(400, 'Aucun modèle OpenRouter choisi. Indiquez-en un dans Réglages, Rédaction automatique.');
@@ -220,17 +252,11 @@ app.post('/api/articles/batch', wrap((req, res) => {
   res.status(202).json({ started: todo.length });
 
   (async () => {
-    const audits = store.getAudits();
-    const last = audits[audits.length - 1];
-    const pages = last && last.sitemapUrls ? last.sitemapUrls.slice(0, 40) : [];
+    const pages = lastAuditPages();
     for (const topic of todo) {
       try {
         const art = await ai.generateArticle(topic, s, pages);
-        const rec = {
-          id: crypto.randomUUID(), topicId: topic.id, keyword: topic.keyword, city: topic.city, month,
-          createdAt: new Date().toISOString(), status: 'a_relire', wpId: null, wpLink: null,
-          simulated: isSimulated(), ...art,
-        };
+        const rec = makeRecord(topic, art, month);
         if (s.autoDraft && wpReady()) {
           try { await pushDraft(rec); } catch (e) {
             log.error(`Envoi automatique en brouillon échoué pour « ${topic.keyword} »`, e);
@@ -252,9 +278,66 @@ app.post('/api/articles/batch', wrap((req, res) => {
 
 app.get('/api/articles/batch/status', (req, res) => res.json(batch));
 
+// Essai de rédaction : un article « pour voir », sans envoi à WordPress ni utilisation du quota,
+// tant qu'on ne clique pas sur « Garder ». Limité : 1 essai toutes les 3 secondes, 10 par jour.
+let pendingTrial = null;
+let lastTrialAt = 0;
+const trialCount = { day: '', n: 0 };
+const trialsPerDay = () => Number(process.env.TRIALS_PER_DAY) || 10;
+const trialCooldown = () => (process.env.TRIAL_COOLDOWN_MS !== undefined ? Number(process.env.TRIAL_COOLDOWN_MS) : 3000);
+const parisDay = () => new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris' }).format(new Date());
+
+app.post('/api/articles/test', wrap(async (req, res) => {
+  const b = req.body || {};
+  const s = store.getSettings();
+  let topic;
+  if (b.topicId) {
+    topic = s.topics.find((t) => t.id === b.topicId);
+    if (!topic) throw fail(404, 'Sujet introuvable : il a peut-être été supprimé.');
+  } else {
+    const keyword = clean(b.keyword, 100);
+    if (!keyword) throw fail(400, 'Choisissez un sujet de la liste ou saisissez un mot-clé.');
+    topic = { id: null, keyword, city: clean(b.city, 60) };
+  }
+  if (!isSimulated()) {
+    if (!secrets.get('openrouterKey')) throw fail(400, 'La clé OpenRouter n\'est pas configurée. Saisissez-la dans Réglages, Rédaction.');
+    if (!ai.effectiveModel(s)) throw fail(400, 'Aucun modèle OpenRouter choisi. Indiquez-en un dans Réglages, Rédaction.');
+  }
+  if (Date.now() - lastTrialAt < trialCooldown()) throw fail(429, 'Patientez quelques secondes avant un nouvel essai.');
+  const day = parisDay();
+  if (trialCount.day !== day) { trialCount.day = day; trialCount.n = 0; }
+  if (trialCount.n >= trialsPerDay()) throw fail(429, `Limite de ${trialsPerDay()} essais par jour atteinte (pour limiter les appels payants). Réessayez demain.`);
+  lastTrialAt = Date.now();
+  trialCount.n += 1;
+
+  const pages = lastAuditPages();
+  const sent = ai.previewPrompt(topic, s, pages);
+  const article = await ai.generateArticle(topic, s, pages);
+  pendingTrial = { id: crypto.randomUUID(), topic, article, simulated: isSimulated() };
+  res.json({ trialId: pendingTrial.id, topic, article, simulated: pendingTrial.simulated, sent, trialsLeft: trialsPerDay() - trialCount.n });
+}));
+
+app.post('/api/articles/test/keep', wrap(async (req, res) => {
+  const t = pendingTrial;
+  if (!t || !req.body || t.id !== req.body.trialId) throw fail(404, 'Cet essai n\'est plus disponible. Relancez-le.');
+  if (!!t.simulated !== isSimulated()) throw fail(409, 'Le mode (démonstration ou réel) a changé depuis cet essai : relancez-le.');
+  const s = store.getSettings();
+  const rec = makeRecord(t.topic, t.article, monthNow());
+  let autoDraftError = '';
+  if (s.autoDraft && wpReady()) {
+    try { await pushDraft(rec); } catch (e) { log.error('Envoi automatique de l\'essai échoué', e); autoDraftError = e.message; }
+  }
+  const list = store.getArticles();
+  list.push(rec);
+  store.saveArticles(list);
+  pendingTrial = null;
+  res.json({ article: rec, autoDraftError });
+}));
+
 app.post('/api/articles/:id/send', wrap(async (req, res) => {
   const { list, a } = findArticle(req.params.id);
   if (a.status !== 'a_relire') throw fail(409, 'Cet article a déjà été envoyé à WordPress.');
+  assertSameMode(a, 'envoyer');
   await pushDraft(a);
   store.saveArticles(list);
   res.json(a);
@@ -264,6 +347,7 @@ app.post('/api/articles/:id/publish', wrap(async (req, res) => {
   const { list, a } = findArticle(req.params.id);
   if (!req.body || req.body.validated !== true) throw fail(400, 'Vous devez confirmer « J\'ai relu et validé ».');
   if (a.status !== 'brouillon_wp') throw fail(409, 'Envoyez d\'abord l\'article en brouillon WordPress.');
+  assertSameMode(a, 'publier');
   // Garde-fou : on relit le texte réellement présent dans WordPress (il a pu être corrigé là-bas).
   if (!isSimulated()) {
     const live = await wp.getContent(a.wpId);
@@ -278,7 +362,8 @@ app.post('/api/articles/:id/publish', wrap(async (req, res) => {
 app.delete('/api/articles/:id', wrap(async (req, res) => {
   const { list, a } = findArticle(req.params.id);
   if (a.status === 'publie') throw fail(409, 'Cet article est publié : supprimez-le directement dans WordPress.');
-  if (a.status === 'brouillon_wp' && a.wpId) await wp.deleteDraft(a.wpId);
+  // Un article de démonstration n'existe pas sur le site : on ne touche jamais à WordPress pour lui.
+  if (a.status === 'brouillon_wp' && a.wpId && !a.simulated) { assertSameMode(a, 'supprimer sur le site'); await wp.deleteDraft(a.wpId); }
   store.saveArticles(list.filter((x) => x.id !== a.id));
   res.json({ ok: true });
 }));
@@ -287,11 +372,23 @@ app.delete('/api/articles/:id', wrap(async (req, res) => {
 app.get('/api/audits', (req, res) => {
   const audits = store.getAudits();
   const latest = audits[audits.length - 1] || null;
+  const previous = audits.length > 1 ? audits[audits.length - 2] : null;
   res.json({
     latest,
+    previous: previous ? { id: previous.id, date: previous.date, score: previous.score, criteria: previous.criteria.map((c) => ({ id: c.id, points: c.points, max: c.max })) } : null,
     history: audits.map((a) => ({ id: a.id, date: a.date, score: a.score, trigger: a.trigger })),
     status: audit.status(),
   });
+});
+
+// Export de l'historique : pour garder une trace durable même sans disque persistant.
+app.get('/api/audits/export.csv', (req, res) => {
+  const audits = store.getAudits();
+  const ids = audits.length ? audits[audits.length - 1].criteria.map((c) => c.id) : [];
+  const rows = [['date', 'score_sur_100', 'lancement', 'pages_analysees', ...ids]];
+  for (const a of audits) rows.push([a.date, a.score, a.trigger, a.pagesCount, ...ids.map((id) => { const c = a.criteria.find((x) => x.id === id); return c ? (c.points == null ? 'non_mesure' : c.points) : ''; })]);
+  res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="historique-score-seo.csv"' });
+  res.send('\ufeff' + rows.map((r) => r.join(';')).join('\n') + '\n');
 });
 
 app.post('/api/audit/run', wrap((req, res) => {

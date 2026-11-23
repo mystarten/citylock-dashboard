@@ -287,3 +287,161 @@ test('WordPress : identifiants de l\'interface utilisés, diagnostic en 2 étape
     Object.assign(process.env, saved); srv.close();
   }
 });
+
+// ---------- Parcours réel complet (faux WordPress + faux OpenRouter) : sujets, lot, essai, publication, modes ----------
+test('sujets pris en compte, lot réel, essai, publication réelle et garde-fous démonstration/réel', async () => {
+  const secrets = require('../lib/secrets');
+  const store = require('../lib/store');
+  const fake = create();
+  const wpSrv = await listen(fake.app);
+  const orReqs = [];
+  const orSrv = http.createServer((req, res) => {
+    let body = ''; req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const j = JSON.parse(body); orReqs.push(j);
+      const art = { title: 'Titre ' + orReqs.length, metaTitle: 'M', metaDescription: 'D', slug: 'titre-' + orReqs.length, htmlContent: '<p>texte</p><p>Selon le secteur, [SOURCE A VERIFIER] des cambriolages.</p>', internalLinkSuggestions: [], faitsAVerifier: ['stat'] };
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(art) } }] }));
+    });
+  });
+  await new Promise((r) => orSrv.listen(0, '127.0.0.1', r));
+  const saved = { ...process.env };
+  const app = await listen(server);
+  const base = `http://127.0.0.1:${app.address().port}`;
+  let cookie = '';
+  const call = async (method, p, body) => {
+    const res = await fetch(base + p, { method, headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'citylock', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    const sc = res.headers.get('set-cookie'); if (sc) cookie = sc.split(';')[0];
+    let json = null; try { json = await res.json(); } catch { /* */ }
+    return { status: res.status, json };
+  };
+  const waitBatch = async () => { for (let i = 0; i < 80; i++) { if (!(await call('GET', '/api/articles/batch/status')).json.running) return; await new Promise((r) => setTimeout(r, 50)); } };
+  try {
+    delete process.env.WP_USER; delete process.env.WP_APP_PASSWORD;
+    Object.assign(process.env, { SIMULATE: 'false', TRIAL_COOLDOWN_MS: '0', WP_BASE_URL: `http://127.0.0.1:${wpSrv.address().port}`, OPENROUTER_BASE_URL: `http://127.0.0.1:${orSrv.address().port}` });
+    // état propre
+    store.saveArticles([]);
+    const st = store.getSettings(); st.topics = []; st.frequency = 2; st.autoDraft = true; delete st.simulate; st.aiModel = 'anthropic/claude-haiku-5-5'; st.systemPrompt = ''; store.saveSettings(st);
+    await call('POST', '/api/login', { username: 'laurent-test', password: 'mdp-de-test-123' });
+    await call('PUT', '/api/secrets', { openrouterKey: 'cle-test-or-0000', wpUser: 'laurent', wpAppPassword: 'abcd efgh' });
+    for (const [keyword, city] of [['alarme sans abonnement', 'Chatou'], ['alarme Ajax maison', 'Yvelines'], ['installation alarme', '']]) await call('POST', '/api/topics', { keyword, city });
+
+    // 1. le plan annonce les bons sujets, dans l'ordre, limités à la fréquence
+    let plan = (await call('GET', '/api/articles/plan')).json;
+    assert.deepStrictEqual([plan.remaining, plan.totalTopics, plan.next.map((t) => t.keyword)], [2, 3, ['alarme sans abonnement', 'alarme Ajax maison']]);
+
+    // 2. un article de démonstration existant ne bloque pas le lot réel
+    store.saveArticles([{ id: 'demo-1', topicId: 'x', keyword: 'demo', city: '', month: plan.month, status: 'a_relire', simulated: true, title: 'Démo', htmlContent: '<p>x</p>', metaTitle: '', metaDescription: '', slug: 'demo', faitsAVerifier: [], internalLinkSuggestions: [], warnings: [], wordCount: 1, createdAt: new Date().toISOString() }]);
+    plan = (await call('GET', '/api/articles/plan')).json;
+    assert.strictEqual(plan.remaining, 2);
+
+    // 3. lot réel : les sujets (mot-clé ET ville) sont bien envoyés à l'IA, avec le modèle choisi
+    assert.strictEqual((await call('POST', '/api/articles/batch')).status, 202);
+    await waitBatch();
+    assert.strictEqual(orReqs.length, 2);
+    assert.ok(orReqs[0].messages[1].content.includes('Mot-clé principal : alarme sans abonnement') && orReqs[0].messages[1].content.includes('Ville ciblée : Chatou'));
+    assert.ok(orReqs[1].messages[1].content.includes('Mot-clé principal : alarme Ajax maison') && orReqs[1].messages[1].content.includes('Ville ciblée : Yvelines'));
+    assert.ok(orReqs.every((r) => r.model === 'anthropic/claude-haiku-5-5'));
+    let list = (await call('GET', '/api/articles')).json;
+    const real = list.filter((a) => !a.simulated);
+    assert.deepStrictEqual(real.map((a) => a.status), ['brouillon_wp', 'brouillon_wp']);
+    assert.ok(real.every((a) => fake.wpPosts.get(a.wpId).status === 'draft'), 'brouillons réellement créés dans le faux WordPress');
+    plan = (await call('GET', '/api/articles/plan')).json;
+    assert.deepStrictEqual([plan.remaining, plan.next.length], [0, 0]);
+    assert.strictEqual((await call('POST', '/api/articles/batch')).status, 409);
+
+    // 4. essai : rien n'est envoyé à WordPress, le quota n'est pas touché, le prompt est visible
+    const postsBefore = fake.wpPosts.size;
+    const trial = await call('POST', '/api/articles/test', { keyword: 'serrure connectée', city: 'Sartrouville' });
+    assert.strictEqual(trial.status, 200);
+    assert.ok(trial.json.sent.user.includes('Mot-clé principal : serrure connectée') && trial.json.sent.user.includes('Ville ciblée : Sartrouville'));
+    assert.ok(trial.json.sent.system.includes('N\'invente JAMAIS') && trial.json.sent.system.includes('FORMAT DE REPONSE'));
+    assert.strictEqual(trial.json.sent.model, 'anthropic/claude-haiku-5-5');
+    assert.strictEqual(fake.wpPosts.size, postsBefore);
+    assert.strictEqual((await call('GET', '/api/articles')).json.length, list.length);
+    assert.strictEqual((await call('POST', '/api/articles/test', {})).status, 400);
+    assert.strictEqual((await call('POST', '/api/articles/test', { topicId: 'inconnu' })).status, 404);
+    const topicTrial = await call('POST', '/api/articles/test', { topicId: (await call('GET', '/api/settings')).json.topics[2].id });
+    assert.ok(topicTrial.json.sent.user.includes('Mot-clé principal : installation alarme') && !topicTrial.json.sent.user.includes('Ville ciblée'));
+    // garder l'essai : il devient un article normal (et part en brouillon), une seule fois
+    const kept = await call('POST', '/api/articles/test/keep', { trialId: topicTrial.json.trialId });
+    assert.strictEqual(kept.json.article.status, 'brouillon_wp');
+    assert.strictEqual((await call('POST', '/api/articles/test/keep', { trialId: topicTrial.json.trialId })).status, 404);
+    // limites : cadence et plafond journalier
+    process.env.TRIAL_COOLDOWN_MS = '60000';
+    assert.strictEqual((await call('POST', '/api/articles/test', { keyword: 'x' })).status, 429);
+    process.env.TRIAL_COOLDOWN_MS = '0'; process.env.TRIALS_PER_DAY = '1';
+    assert.strictEqual((await call('POST', '/api/articles/test', { keyword: 'x' })).status, 429);
+    delete process.env.TRIALS_PER_DAY;
+
+    // 5. publication réelle : refusée tant que le marqueur reste dans WordPress, puis vraie publication
+    list = (await call('GET', '/api/articles')).json;
+    const target = list.find((a) => !a.simulated && a.status === 'brouillon_wp');
+    assert.strictEqual((await call('POST', `/api/articles/${target.id}/publish`, { validated: true })).status, 409);
+    assert.strictEqual(fake.wpPosts.get(target.wpId).status, 'draft');
+    fake.wpPosts.get(target.wpId).content = '<p>Texte corrigé avec une vraie source.</p>';
+    assert.strictEqual((await call('POST', `/api/articles/${target.id}/publish`, {})).status, 400);
+    const pub = await call('POST', `/api/articles/${target.id}/publish`, { validated: true });
+    assert.strictEqual(pub.status, 200);
+    assert.strictEqual(fake.wpPosts.get(target.wpId).status, 'publish', 'publié pour de vrai dans WordPress');
+
+    // 6. garde-fous : un article de démonstration ne touche jamais WordPress en mode réel
+    assert.strictEqual((await call('POST', '/api/articles/demo-1/send')).status, 409);
+    const wpCallsBefore = fake.wpPosts.size;
+    assert.strictEqual((await call('DELETE', '/api/articles/demo-1')).status, 200);
+    assert.strictEqual(fake.wpPosts.size, wpCallsBefore);
+    store.saveArticles([...store.getArticles(), { id: 'demo-2', topicId: null, keyword: 'd', city: '', month: plan.month, status: 'brouillon_wp', wpId: 900001, simulated: true, title: 'd', htmlContent: '<p>x</p>', metaTitle: '', metaDescription: '', slug: 'd', faitsAVerifier: [], internalLinkSuggestions: [], warnings: [], wordCount: 1, createdAt: new Date().toISOString() }]);
+    assert.strictEqual((await call('POST', '/api/articles/demo-2/publish', { validated: true })).status, 409);
+    assert.strictEqual((await call('POST', '/api/articles/purge-demo')).json.removed, 1);
+
+    // 7. en mode démonstration, un VRAI brouillon ne peut être ni publié ni supprimé pour de faux
+    const draftReal = list.find((a) => !a.simulated && a.status === 'brouillon_wp' && a.id !== target.id);
+    await call('PUT', '/api/settings', { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', simulate: true });
+    assert.strictEqual((await call('GET', '/api/status')).json.simulate, true);
+    assert.strictEqual((await call('POST', `/api/articles/${draftReal.id}/publish`, { validated: true })).status, 409);
+    assert.strictEqual((await call('DELETE', `/api/articles/${draftReal.id}`)).status, 409);
+    assert.strictEqual(fake.wpPosts.get(draftReal.wpId).status, 'draft', 'rien n\'a été publié par erreur');
+    // en démonstration, l'essai est marqué comme tel, et « garder » refuse si le mode change entre-temps
+    const demoTrial = await call('POST', '/api/articles/test', { keyword: 'essai démo' });
+    assert.strictEqual(demoTrial.json.simulated, true);
+    await call('PUT', '/api/settings', { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', simulate: false });
+    assert.strictEqual((await call('POST', '/api/articles/test/keep', { trialId: demoTrial.json.trialId })).status, 409);
+  } finally {
+    for (const k of ['openrouterKey', 'wpAppPassword', 'pagespeedKey']) secrets.set(k, '');
+    const st = store.getSettings(); delete st.simulate; st.wpUser = ''; st.aiModel = ''; st.topics = []; store.saveSettings(st);
+    Object.assign(process.env, saved); delete process.env.OPENROUTER_BASE_URL; delete process.env.TRIAL_COOLDOWN_MS; delete process.env.TRIALS_PER_DAY;
+    app.close(); wpSrv.close(); orSrv.close();
+  }
+});
+
+test('score : critère « entreprise locale » explicite, progression et export CSV', async () => {
+  const store = require('../lib/store');
+  const { computeScore } = require('../lib/scoring');
+  // le constat dit ce qui a réellement été trouvé et précise que ce n'est pas la fiche Google Business Profile
+  const home = { url: 'https://x.test/', isHome: true, title: 'a'.repeat(40), metaDescription: 'm'.repeat(130), h1Count: 1, images: { total: 0, withAlt: 0 }, jsonLdTypes: ['Organization', 'WebSite'], words: 500 };
+  const c = computeScore({ pages: [home], sitemapUrls: ['https://x.test/'], sitemapCount: 0, orphans: [], links: { checked: 1, broken: [] }, robotsHasSitemap: true, speed: null }).criteria.find((x) => x.id === 'localbusiness');
+  assert.strictEqual(c.points, 0);
+  assert.ok(c.measured.includes('Organization, WebSite') && c.explanation.includes('pas votre fiche Google Business Profile'));
+
+  const s = await listen(server);
+  const base = `http://127.0.0.1:${s.address().port}`;
+  let cookie = '';
+  const call = async (method, p, body) => {
+    const res = await fetch(base + p, { method, headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'citylock', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    const sc = res.headers.get('set-cookie'); if (sc) cookie = sc.split(';')[0];
+    return res;
+  };
+  const savedAudits = store.getAudits();
+  try {
+    const mk = (date, score, pts) => ({ id: date, date, trigger: 'manuel', pagesCount: 24, score, points: score, maxCounted: 90, improvements: [], criteria: [{ id: 'title', points: pts, max: 10 }, { id: 'speed', points: null, max: 10, notMeasured: true }] });
+    store.saveAudits([mk('2026-11-10T08:00:00Z', 60, 5), mk('2026-11-17T08:00:00Z', 68, 7.5)]);
+    await call('POST', '/api/login', { username: 'laurent-test', password: 'mdp-de-test-123' });
+    const d = await (await call('GET', '/api/audits')).json();
+    assert.strictEqual(d.latest.score, 68);
+    assert.deepStrictEqual([d.previous.score, d.previous.criteria[0].points], [60, 5]); // de quoi afficher la progression
+    const csv = await (await call('GET', '/api/audits/export.csv')).text();
+    const lines = csv.replace('\ufeff', '').trim().split('\n');
+    assert.strictEqual(lines[0], 'date;score_sur_100;lancement;pages_analysees;title;speed');
+    assert.strictEqual(lines[2], '2026-11-17T08:00:00Z;68;manuel;24;7.5;non_mesure');
+  } finally { store.saveAudits(savedAudits); s.close(); }
+});
