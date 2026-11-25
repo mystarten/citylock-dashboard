@@ -75,12 +75,14 @@
   }
   const safe = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message, true); } };
 
+
   // ---------- Etat ----------
-  const S = { settings: null, status: null, articles: [], audits: null, view: 'home', articleId: null, batch: { running: false, done: 0, total: 0, errors: [] }, auditRunning: false };
+  const S = { settings: null, status: null, articles: [], audits: null, view: 'home', articleId: null, writeMode: 'one', plan: null, batch: { running: false, done: 0, total: 0, errors: [], notes: [] }, auditRunning: false, settingsTab: 'redaction', msgs: {} };
   let pollTimer = null;
 
   const NAV = [
     ['home', 'Accueil', 'home'],
+    ['write', 'Rédiger', 'spark'],
     ['articles', 'Articles', 'file'],
     ['score', 'Score du site', 'gauge'],
     ['settings', 'Réglages', 'sliders'],
@@ -88,9 +90,14 @@
   ];
   const demoOn = () => !!(S.status && S.status.simulate);
   const mine = () => S.articles.filter((a) => !!a.simulated === demoOn()); // articles du mode en cours
-  const pending = () => mine().filter((a) => a.status !== 'publie').length;
-
+  const pending = () => mine().filter((a) => a.status === 'a_relire').length;
+  const limits = () => ({ min: (S.settings && S.settings.minWords) || 600, max: (S.settings && S.settings.maxWords) || 900 });
   const navActive = (id) => S.view === id || (id === 'articles' && (S.view === 'article' || S.view === 'edit'));
+  const fmtDateTime = (iso) => new Date(iso).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const fmtDay = (ymd) => new Date(ymd + 'T12:00:00Z').toLocaleDateString('fr-FR', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
+  const todayParis = () => new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris' }).format(new Date());
+  const plusDays = (ymd, n) => { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+  const modelTag = (m) => el('span', { class: 'model-tag' }, 'Rédigé avec : ', el('b', {}, m === 'démonstration' ? 'texte de démonstration (aucune IA)' : (m || 'modèle non enregistré')));
 
   function renderNav() {
     const nav = $('nav');
@@ -102,11 +109,9 @@
     $('logout').replaceChildren(icon('logout'), el('span', {}, 'Se déconnecter'));
   }
 
-  async function refreshPlan() { S.plan = await api('/articles/plan'); }
-
   async function refresh() {
-    const [settings, status, articles, audits, aiDefaults, plan, publications] = await Promise.all([api('/settings'), api('/status'), api('/articles'), api('/audits'), api('/ai/defaults'), api('/articles/plan'), api('/publications')]);
-    Object.assign(S, { settings, status, articles, audits, aiDefaults, plan, publications });
+    const [settings, status, articles, audits, aiDefaults, publications] = await Promise.all([api('/settings'), api('/status'), api('/articles'), api('/audits'), api('/ai/defaults'), api('/publications')]);
+    Object.assign(S, { settings, status, articles, audits, aiDefaults, publications });
     S.auditRunning = !!audits.status.running;
     $('sim').classList.toggle('hidden', !status.simulate);
   }
@@ -117,202 +122,272 @@
     if (view !== 'edit') S.edit = null;
     window.scrollTo(0, 0);
     render();
-    if (view === 'articles' || view === 'home') refreshPlan().then(() => { if (S.view === view) render(); }).catch(() => {});
     if (view === 'score') watchAudit();
+    if (view === 'articles' || view === 'home') refresh().then(() => { if (S.view === view) render(); }).catch(() => {}); // met aussi à jour les articles publiés par WordPress
   }
 
   function render() {
-    // Le bandeau suit TOUJOURS le mode en cours (il disparaît dès que le mode démonstration est désactivé).
     $('sim').classList.toggle('hidden', !(S.status && S.status.simulate));
     renderNav();
     const main = $('main');
     main.replaceChildren();
-    const views = { home: viewHome, articles: viewArticles, article: viewArticle, edit: viewEdit, score: viewScore, settings: viewSettings, help: viewHelp };
+    const views = { home: viewHome, write: viewWrite, articles: viewArticles, article: viewArticle, edit: viewEdit, score: viewScore, settings: viewSettings, help: viewHelp };
     main.append(...[].concat(views[S.view]()).filter(Boolean));
   }
   const head = (title, sub, right) => el('div', { class: 'page-head' }, el('div', {}, el('h1', {}, title), sub ? el('p', { class: 'muted' }, sub) : null), right || null);
 
+  // Les liens du texte sont écrits « /page/ » : dans l'aperçu ils doivent ouvrir VOTRE site (pas ce tableau de bord).
+  const siteBase = () => ((S.status && S.status.siteUrl) || '').replace(/\/+$/, '');
+  function fixLinks(root) {
+    const base = siteBase();
+    root.querySelectorAll('a').forEach((a) => {
+      const h = a.getAttribute('href') || '';
+      if (h.startsWith('/')) { if (base) a.setAttribute('href', base + h); else a.removeAttribute('href'); }
+      if (a.getAttribute('href')) { a.setAttribute('target', '_blank'); a.setAttribute('rel', 'noopener noreferrer'); a.setAttribute('title', a.getAttribute('href')); }
+    });
+  }
+  function linksOf(html) {
+    const box = el('div', {}); box.innerHTML = html; fixLinks(box); // assaini côté serveur
+    return [...box.querySelectorAll('a')].map((a) => ({ text: a.textContent.trim(), href: a.getAttribute('href') })).filter((l) => l.href);
+  }
+  function previewOf(html) {
+    const p = el('div', { class: 'preview' });
+    p.innerHTML = html; // HTML assaini côté serveur (balises autorisées uniquement)
+    highlightMarkers(p); fixLinks(p);
+    return p;
+  }
+
+  // Appelle une route avec les confirmations demandées par le serveur (hors plage, points à vérifier, texte modifié sur le site).
+  async function confirmed(path, body) {
+    let extra = {};
+    for (let i = 0; i < 4; i++) {
+      try { return await api(path, 'POST', { ...body, ...extra }); } catch (e) {
+        if (e.code === 'out_of_range') { if (!confirm(e.message)) return null; extra = { ...extra, confirmOutOfRange: true }; }
+        else if (e.code === 'issues') { if (!confirm(e.message)) return null; extra = { ...extra, confirmIssues: true }; }
+        else if (e.code === 'wp_changed') { if (!confirm(e.message)) return null; extra = { ...extra, force: true }; }
+        else throw e;
+      }
+    }
+    return null;
+  }
+
   // ---------- Accueil ----------
   function viewHome() {
-    const s = S.settings;
-    const used = mine().filter((a) => a.month === monthNow()).length;
+    const s = S.settings, m = mine();
+    const toReview = m.filter((a) => a.status === 'a_relire').length;
+    const drafts = m.filter((a) => a.status === 'brouillon_wp').length;
+    const sched = m.filter((a) => a.status === 'programme').sort((x, y) => x.scheduledAt.localeCompare(y.scheduledAt));
+    const published = m.filter((a) => a.status === 'publie').length;
     const latest = S.audits.latest;
-    const toReview = mine().filter((a) => a.status === 'a_relire').length;
-    const drafts = mine().filter((a) => a.status === 'brouillon_wp').length;
-    const usedTopics = new Set(mine().filter((a) => a.month === monthNow()).map((a) => a.topicId));
-    const freeTopics = s.topics.filter((t) => !usedTopics.has(t.id)).length;
+    const jump = (tab) => () => { S.settingsTab = tab; go('settings'); };
 
     let next;
-    if (!s.topics.length) next = ['Commencez par choisir vos sujets', 'Indiquez les thèmes dont vous voulez parler, par exemple « alarme sans abonnement » à Chatou.', 'Ajouter des sujets', () => { S.settingsTab = 'ia'; go('settings'); }];
-    else if (!S.status.simulate && (!S.status.wordpress || !S.status.openrouter)) next = ['Terminez la mise en route', 'Il manque la liaison avec WordPress ou la clé de rédaction pour travailler en mode réel.', 'Ouvrir les connexions', () => { S.settingsTab = 'connexions'; go('settings'); }];
-    else if (toReview) next = [`${toReview} ${plural(toReview, 'article attend', 'articles attendent')} votre relecture`, 'Lisez le texte, vérifiez les chiffres signalés, puis envoyez-le sur votre site.', 'Relire maintenant', () => go('articles')];
-    else if (drafts) next = [`${drafts} ${plural(drafts, 'brouillon est prêt', 'brouillons sont prêts')} sur votre site`, 'Ils ne sont pas visibles du public. Relisez-les, puis publiez-les.', 'Voir les brouillons', () => go('articles')];
-    else if (used < s.frequency && freeTopics) next = ['Rédigez les articles du mois', `Il reste ${Math.min(s.frequency - used, freeTopics)} ${plural(Math.min(s.frequency - used, freeTopics), 'article', 'articles')} à préparer ce mois-ci.`, 'Rédiger maintenant', () => { go('articles'); startBatch(); }];
+    if (!S.status.simulate && (!S.status.wordpress || !S.status.openrouter)) next = ['Terminez la mise en route', 'Il manque la liaison avec WordPress ou la clé de rédaction pour travailler en mode réel.', 'Ouvrir les connexions', jump('connexions')];
+    else if (!m.length) next = ['Rédigez votre premier article', 'Choisissez un sujet : l\'article apparaît en quelques instants, prêt à être relu.', 'Rédiger un article', () => go('write')];
+    else if (toReview) next = [`${toReview} ${plural(toReview, 'article attend', 'articles attendent')} votre relecture`, 'Lisez, corrigez à la main si besoin, puis envoyez-le sur le site ou programmez-le.', 'Relire maintenant', () => go('articles')];
+    else if (m.some((a) => a.plannedDate && ['a_relire', 'brouillon_wp'].includes(a.status))) next = ['Des articles ont une date prévue', 'Programmez-les d\'un clic : WordPress les publiera tout seul à la date choisie.', 'Voir les articles', () => go('articles')];
     else if (!latest) next = ['Mesurez la santé de votre site', 'Le score vous dit en 1 minute ce qu\'il faut améliorer sur citylock.fr.', 'Mesurer mon site', () => { go('score'); startAudit(); }];
-    else next = ['Tout est à jour', 'Revenez le mois prochain, ou ajoutez de nouveaux sujets quand vous voulez.', 'Voir mes sujets', () => go('settings')];
+    else next = ['Tout est à jour', 'Rédigez un nouvel article ou planifiez les prochains mois.', 'Rédiger', () => go('write')];
 
     const wpPill = S.status.simulate ? el('span', { class: 'pill warn' }, 'Démonstration')
       : S.status.wordpress ? el('span', { class: 'pill ok' }, icon('check'), 'Configuré') : el('span', { class: 'pill ko' }, 'À configurer');
-
     return [
       head('Bonjour', 'Voici où vous en êtes.'),
       el('div', { class: 'grid3' },
-        el('div', { class: 'card stat' }, el('div', { class: 'label' }, icon('file'), 'Articles ce mois-ci'), el('div', { class: 'value' }, used, el('small', {}, ' sur ' + s.frequency)), el('div', { class: 'hint' }, 'Objectif choisi dans les réglages')),
-        el('div', { class: 'card stat' }, el('div', { class: 'label' }, icon('gauge'), 'Score du site'),
-          el('div', { class: 'value' }, latest ? latest.score : '--', el('small', {}, ' / 100')),
+        el('div', { class: 'card stat' }, el('div', { class: 'label' }, icon('file'), 'Articles'), el('div', { class: 'value' }, m.length),
+          el('div', { class: 'hint' }, `${toReview + drafts} à relire ou en brouillon · ${sched.length} programmé${sched.length > 1 ? 's' : ''} · ${published} publié${published > 1 ? 's' : ''}`)),
+        el('div', { class: 'card stat' }, el('div', { class: 'label' }, icon('gauge'), 'Score du site'), el('div', { class: 'value' }, latest ? latest.score : '--', el('small', {}, ' / 100')),
           el('div', { class: 'hint' }, latest ? 'Mesuré le ' + fmtDate(latest.date) : 'Pas encore mesuré')),
         el('div', { class: 'card stat' }, el('div', { class: 'label' }, icon('plug'), 'Liaison avec votre site'), el('div', { class: 'value' }, wpPill), el('div', { class: 'hint' }, 'WordPress (citylock.fr)'))),
-      el('div', { class: 'card next' },
-        el('div', {}, el('div', { class: 'eyebrow' }, 'Votre prochaine étape'), el('h2', {}, next[0]), el('p', {}, next[1])),
+      el('div', { class: 'card next' }, el('div', {}, el('div', { class: 'eyebrow' }, 'Votre prochaine étape'), el('h2', {}, next[0]), el('p', {}, next[1])),
         el('button', { class: 'btn primary big', type: 'button', onclick: safe(next[3]) }, next[2])),
-      el('div', { class: 'card' }, el('h2', {}, 'Comment ça marche'), el('p', { class: 'muted' }, 'Trois étapes, et vous gardez toujours la main.'),
+      sched.length ? el('div', { class: 'card' }, el('h2', {}, 'Prochaines publications'), el('ul', { class: 'versions' }, sched.slice(0, 5).map((a) => el('li', {}, el('div', { class: 'grow' }, el('b', {}, a.title), el('div', { class: 'muted small' }, fmtDateTime(a.scheduledAt))), el('button', { class: 'btn', type: 'button', onclick: () => go('article', a.id) }, 'Ouvrir'))))) : null,
+      el('div', { class: 'card' }, el('h2', {}, 'Comment ça marche'), el('p', { class: 'muted' }, 'Deux façons de travailler, et vous gardez toujours la main.'),
         el('div', { class: 'steps' },
-          step(1, 'Choisir', 'Vous validez les sujets et le nombre d\'articles par mois.'),
-          step(2, 'Relire', 'L\'outil rédige. Vous lisez, vous corrigez les chiffres signalés.'),
-          step(3, 'Publier', 'Un clic envoie l\'article sur votre site, d\'abord en brouillon.'))),
+          step(1, 'Rédiger', 'Un seul article, ou plusieurs mois d\'un coup avec une date par article.'),
+          step(2, 'Relire et corriger', 'Vous lisez, vous modifiez à la main si besoin. Rien n\'est publié sans vous.'),
+          step(3, 'Programmer ou publier', 'WordPress publie tout seul à la date choisie, ou vous publiez tout de suite.'))),
     ];
   }
   const step = (n, t, d) => el('div', { class: 'step' }, el('div', { class: 'num' }, n), el('div', {}, el('h3', {}, t), el('p', { class: 'muted small' }, d)));
 
-  // ---------- Articles ----------
-  const STATUS = { a_relire: ['À relire', 'warn'], brouillon_wp: ['Brouillon sur le site', 'warn'], publie: ['Publié', 'ok'] };
+  // ---------- Rédiger : deux modes ----------
+  const topicLabel = (t) => t.keyword + (t.city ? ' à ' + t.city : '');
 
-  function planCard() {
-    const pl = S.plan, s = S.settings;
-    const card = el('div', { class: 'card' }, el('h2', {}, 'Ce qui sera rédigé'));
-    if (!pl.totalTopics) {
-      add(card, el('p', { class: 'muted' }, 'Aucun sujet pour l\'instant. Les sujets sont la base de chaque article : ajoutez les vôtres dans les réglages.'),
-        el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: () => { S.settingsTab = 'ia'; go('settings'); } }, 'Ajouter des sujets')));
-    } else if (pl.remaining <= 0) {
-      add(card, el('p', {}, `Le lot du mois est complet : ${pl.already} ${plural(pl.already, 'article rédigé', 'articles rédigés')} sur ${pl.frequency}.`),
-        pl.availableTopics ? el('p', { class: 'muted small' }, `${pl.availableTopics} ${plural(pl.availableTopics, 'sujet attend', 'sujets attendent')} le mois prochain.`) : null);
-    } else if (!pl.next.length) {
-      add(card, el('p', {}, 'Tous vos sujets ont déjà été utilisés ce mois-ci. Ajoutez de nouveaux sujets dans les réglages pour continuer.'),
-        el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: () => { S.settingsTab = 'ia'; go('settings'); } }, 'Ajouter des sujets')));
-    } else {
-      add(card, el('p', { class: 'muted' }, `Ce mois-ci : ${pl.already} sur ${pl.frequency} rédigés. Le prochain lot rédigera ${pl.next.length} ${plural(pl.next.length, 'article', 'articles')}, un par sujet, dans cet ordre :`),
-        el('ol', { class: 'tasks' }, pl.next.map((t) => el('li', {}, el('b', {}, t.keyword), t.city ? ' à ' + t.city : ''))),
-        pl.availableTopics > pl.next.length ? el('p', { class: 'muted small' }, `${pl.availableTopics - pl.next.length} ${plural(pl.availableTopics - pl.next.length, 'autre sujet attend', 'autres sujets attendent')} le mois prochain.`) : null);
-    }
-    if (demoOn()) add(card, el('p', { class: 'muted small' }, 'Mode démonstration : les articles seront des textes de test, rien ne part sur votre site.'));
-    return card;
-  }
-
-  // Essai de rédaction : un article « pour voir », sans envoi sur le site ni usage du quota tant qu'on ne le garde pas.
-  function trialCard() {
+  function viewWrite() {
     const s = S.settings;
-    const sel = el('select', { id: 'trial-topic', 'aria-label': 'Sujet de l\'essai' },
-      [...s.topics.map((t) => el('option', { value: t.id }, t.keyword + (t.city ? ' à ' + t.city : ''))), el('option', { value: '__free' }, 'Autre sujet (je le tape)')]);
-    sel.value = S.trialSel && [...sel.options].some((o) => o.value === S.trialSel) ? S.trialSel : sel.options[0].value;
-    const kw = el('input', { type: 'text', id: 'trial-kw', maxlength: 100, placeholder: 'Mot-clé, par exemple : serrure connectée', 'aria-label': 'Mot-clé' });
-    const city = el('input', { type: 'text', id: 'trial-city', maxlength: 60, placeholder: 'Ville (facultatif)', 'aria-label': 'Ville' });
-    kw.value = S.trialKw || ''; city.value = S.trialCity || '';
+    const seg = el('div', { class: 'seg', role: 'tablist' }, [['one', 'Un seul article'], ['many', 'Plusieurs articles (planning)']].map(([id, label]) =>
+      el('button', { type: 'button', role: 'tab', class: S.writeMode === id ? 'on' : '', 'aria-selected': S.writeMode === id ? 'true' : 'false', onclick: () => { S.writeMode = id; render(); } }, label)));
+    const out = [head('Rédiger', 'Choisissez comment travailler.'), seg];
+    if (S.settings.promptProblems && S.settings.promptProblems.length) out.push(el('div', { class: 'alert' }, 'Votre prompt a un souci : ' + S.settings.promptProblems.join(' '), ' ', el('button', { class: 'btn', type: 'button', onclick: () => { S.settingsTab = 'redaction'; go('settings'); } }, 'Ouvrir le prompt')));
+    out.push(...(S.writeMode === 'one' ? writeOne() : writeMany()));
+    return out;
+  }
+
+  function writeOne() {
+    const s = S.settings;
+    const W = S.one || (S.one = { sel: '', kw: '', city: '', busy: false, err: '', sent: null });
+    const sel = el('select', { id: 'one-topic', 'aria-label': 'Sujet' }, [...s.topics.map((t) => el('option', { value: t.id }, topicLabel(t))), el('option', { value: '__free' }, 'Un autre sujet (je le tape)')]);
+    sel.value = [...sel.options].some((o) => o.value === W.sel) ? W.sel : (s.topics.length ? sel.options[0].value : '__free');
+    const kw = el('input', { type: 'text', id: 'one-kw', maxlength: 100, placeholder: 'Mot-clé, par exemple : serrure connectée', 'aria-label': 'Mot-clé' });
+    const city = el('input', { type: 'text', id: 'one-city', maxlength: 60, placeholder: 'Ville (facultatif)', 'aria-label': 'Ville' });
+    kw.value = W.kw; city.value = W.city;
     const free = el('div', { class: 'row mt' }, kw, city);
-    const sync = () => { S.trialSel = sel.value; S.trialKw = kw.value; S.trialCity = city.value; free.classList.toggle('hidden', sel.value !== '__free'); };
+    const sync = () => { W.sel = sel.value; W.kw = kw.value; W.city = city.value; free.classList.toggle('hidden', sel.value !== '__free'); };
     [sel, kw, city].forEach((n) => n.addEventListener('input', sync)); sel.addEventListener('change', sync); sync();
+    const body = () => (sel.value === '__free' ? { keyword: kw.value, city: city.value } : { topicId: sel.value });
 
-    const run = el('button', { class: 'btn primary', type: 'button', disabled: S.trialBusy ? true : false, onclick: safe(async () => {
-      sync(); await runTrial(sel.value === '__free' ? { keyword: kw.value, city: city.value } : { topicId: sel.value });
-    }) }, icon('spark'), S.trialBusy ? 'Rédaction en cours...' : 'Rédiger un essai');
+    const run = el('button', { class: 'btn primary big', type: 'button', disabled: W.busy ? true : false, onclick: safe(async () => {
+      sync(); W.busy = true; W.err = ''; render();
+      try {
+        const r = await api('/write/one', 'POST', body());
+        W.busy = false; await refresh(); toast('Article rédigé. Relisez-le, modifiez-le si besoin, puis envoyez-le ou programmez-le.');
+        go('article', r.article.id); return;
+      } catch (e) { W.err = e.message; }
+      W.busy = false; render();
+    }) }, icon('spark'), W.busy ? 'Rédaction en cours...' : 'Rédiger l\'article');
 
-    const card = el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Essayer un article'), el('button', { class: 'btn ghost', type: 'button', onclick: () => { S.trialOpen = false; S.trial = null; render(); } }, 'Fermer')),
-      el('p', { class: 'muted' }, 'Rédige un article d\'essai pour juger la qualité, sans rien envoyer sur votre site et sans toucher au lot du mois. Il utilise le modèle et les instructions des réglages.'),
-      el('label', { for: 'trial-topic' }, 'Sujet de l\'essai'), sel, free,
-      el('div', { class: 'row btn-row' }, run),
-      el('p', { class: 'muted small' }, demoOn() ? 'Mode démonstration : texte de test, aucun appel réel.' : 'Un essai coûte un appel à l\'IA (quelques centimes). Limite : 10 essais par jour.'));
-    if (S.trialBusy) add(card, el('p', { class: 'muted small' }, 'Cela peut prendre jusqu\'à une minute. Vous pouvez rester sur cette page.'));
-    if (S.trialErr) add(card, el('div', { class: 'alert mt' }, S.trialErr));
-    if (S.trial) add(card, trialResult(S.trial));
-    return card;
+    const seeBtn = el('button', { class: 'btn', type: 'button', onclick: safe(async () => { sync(); W.sent = await api('/write/preview', 'POST', body()); render(); }) }, 'Voir ce qui sera envoyé à l\'IA');
+    const card = el('div', { class: 'card' }, el('h2', {}, 'Un seul article'),
+      el('p', { class: 'muted' }, 'Il apparaît dans « Articles », en attente : vous pouvez le relire, le modifier à la main, l\'envoyer en brouillon sur le site ou le programmer à la date de votre choix.'),
+      el('label', { for: 'one-topic' }, 'Sujet'), sel, free,
+      el('div', { class: 'row btn-row' }, run, seeBtn),
+      el('p', { class: 'muted small' }, demoOn() ? 'Mode démonstration : texte de test, aucun appel réel.' : 'Un article coûte un appel à l\'IA (quelques centimes). Cela peut prendre jusqu\'à une minute.'));
+    if (!s.topics.length) add(card, el('p', { class: 'muted small' }, 'Astuce : enregistrez vos sujets dans Réglages, Rédaction pour les retrouver ici.'));
+    if (W.err) add(card, el('div', { class: 'alert mt' }, W.err));
+    if (W.sent) add(card, el('details', { class: 'faq', open: 'open' }, el('summary', {}, 'Ce qui sera envoyé à l\'IA'), el('div', { class: 'a' },
+      el('p', { class: 'muted small' }, 'Modèle : ' + (W.sent.sent.model || '(aucun choisi)')),
+      el('h3', {}, 'Message sur l\'entreprise et le sujet'), el('pre', { class: 'pre' }, W.sent.sent.user),
+      el('h3', {}, 'Votre prompt (Réglages, Rédaction)'), el('pre', { class: 'pre' }, W.sent.sent.system || '(vide)'))));
+    return [card];
   }
 
-  async function runTrial(body) {
-    S.trialBody = body; S.trialBusy = true; S.trial = null; S.trialErr = ''; render();
-    try { S.trial = await api('/articles/test', 'POST', body); } catch (e) { S.trialErr = e.message; }
-    S.trialBusy = false; render();
-  }
-
-  function trialResult(t) {
-    const a = t.article, c = t.check;
-    const preview = el('div', { class: 'preview' });
-    preview.innerHTML = a.htmlContent; // HTML assaini côté serveur
-    highlightMarkers(preview);
-    const sent = t.sent || {};
-    const regenBtn = el('button', { class: 'btn' + (!c.inRange ? ' primary' : ''), type: 'button', onclick: safe(() => runTrial(S.trialBody)) }, icon('refresh'), 'Régénérer');
-    const others = c.issues.filter((i) => i.code !== 'length');
-    const box = el('div', { class: 'trial' },
-      el('div', { class: 'row-between' }, el('h3', {}, 'Résultat de l\'essai'), el('span', { class: 'pill ' + (t.simulated ? 'warn' : 'ok') }, t.simulated ? 'Texte de démonstration' : 'Rédigé par l\'IA')),
-      el('div', { class: 'state-line' }, modelTag(a.modelUsed)),
-      el('p', { class: 'muted small' }, `Sujet : ${t.topic.keyword}${t.topic.city ? ' à ' + t.topic.city : ''} · ${c.words} mots · titre pour Google (${a.metaTitle.length}/60) · description (${a.metaDescription.length}/155)`),
-      el('div', { class: 'card post' }, el('h2', {}, a.title), preview),
-      !c.inRange ? el('div', { class: 'alert' }, lengthMsg(c) + ' Vous pouvez le régénérer.', el('div', { class: 'actions' }, regenBtn)) : null,
-      others.length ? el('ul', { class: 'tasks' }, others.map((i) => el('li', { class: i.blocking ? 'warn' : 'muted' }, i.message))) : el('p', { class: 'ok-text' }, c.inRange ? 'Aucun problème détecté.' : ''),
-      el('details', { class: 'faq' }, el('summary', {}, 'Ce qui a été envoyé à l\'IA'), el('div', { class: 'a' },
-        el('p', { class: 'muted small' }, (t.simulated ? 'Mode démonstration : voici ce qui serait envoyé, rien n\'est réellement envoyé. ' : '') + 'Modèle : ' + (sent.model || '(aucun choisi)')),
-        el('h3', {}, 'Message sur l\'entreprise et le sujet'), el('pre', { class: 'pre' }, sent.user || ''),
-        el('h3', {}, 'Instructions pour la rédaction (modifiables dans Réglages, Rédaction)'), el('pre', { class: 'pre' }, sent.system || ''))),
-      el('div', { class: 'row btn-row' },
-        el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => {
-          if (!c.inRange && !askLength(c)) return;
-          const r = await api('/articles/test/keep', 'POST', { trialId: t.trialId });
-          S.trial = null; S.trialOpen = false; await refresh();
-          const msg = r.autoDraftSkipped === 'length' ? 'Article gardé. Il n\'a pas été envoyé sur le site : sa longueur est hors de la plage demandée.'
-            : r.autoDraftError ? 'Article gardé, mais l\'envoi sur le site a échoué : ' + r.autoDraftError : 'Article gardé dans vos articles.';
-          toast(msg, !!r.autoDraftError);
-          go('article', r.article.id);
-        }) }, 'Garder dans mes articles'),
-        !c.inRange ? null : regenBtn,
-        el('button', { class: 'btn', type: 'button', onclick: () => { S.trial = null; render(); } }, 'Ne pas garder')),
-      el('p', { class: 'muted small' }, 'Si vous le gardez, il compte dans le lot du mois' + (t.trialsLeft != null && !t.simulated ? ` (il reste ${t.trialsLeft} essais aujourd'hui).` : '.')));
-    return box;
-  }
-
-  const fmtDateTime = (iso) => new Date(iso).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-  const modelTag = (m) => el('span', { class: 'model-tag' }, 'Rédigé avec : ', el('b', {}, m === 'démonstration' ? 'texte de démonstration (aucune IA)' : (m || 'modèle non enregistré')));
-  const lengthMsg = (c) => `Cet article compte ${c.words} mots : il en faut entre 600 et 900. Il n'est ni envoyé automatiquement sur le site, ni publié sans votre confirmation.`;
-  const askLength = (c) => confirm(`Cet article compte ${c.words} mots (attendu : 600 à 900).\nContinuer quand même ?`);
-
-  function viewArticles() {
-    const s = S.settings, b = S.batch, pl = S.plan;
-    const demoCount = S.articles.filter((a) => a.simulated).length;
-    const out = [head('Articles', `Objectif du mois : ${s.frequency} ${plural(s.frequency, 'article', 'articles')}. Déjà rédigés : ${pl.already}.`,
-      el('div', { class: 'row' },
-        el('button', { class: 'btn big', type: 'button', onclick: () => { S.trialOpen = !S.trialOpen; render(); } }, icon('file'), 'Essayer un article'),
-        el('button', { class: 'btn primary big', type: 'button', disabled: b.running || pl.remaining <= 0 || !pl.next.length ? true : false, onclick: safe(startBatch) }, icon('spark'), 'Rédiger les articles du mois')))];
-
-    const modeText = { brouillon: 'Chaque article rédigé est envoyé sur votre site en brouillon. Rien n\'est publié sans votre clic.', essai: 'Mode « essai » : chaque article est envoyé en brouillon et marqué « essai ». Rien n\'est publié sans votre clic.', automatique: 'Mode automatique : les articles qui remplissent toutes les conditions sont publiés seuls, après un délai d\'attente où vous pouvez annuler.' }[s.publishMode] || '';
-    out.push(el('div', { class: 'alert' + (s.publishMode === 'automatique' ? '' : ' ok') }, (s.publishMode === 'brouillon' && !s.autoDraft) ? 'Les articles restent ici jusqu\'à ce que vous les envoyiez vous-même sur le site.' : modeText));
-    if (S.trialOpen) out.push(trialCard());
-    out.push(planCard());
-
+  function writeMany() {
+    const s = S.settings, b = S.batch;
+    const P = S.many || (S.many = { months: 3, perMonth: 2, startDate: plusDays(todayParis(), 7), items: null, err: '' });
+    const out = [];
     if (b.running) {
       out.push(el('div', { class: 'card' }, el('h2', {}, 'Rédaction en cours...'),
-        el('p', { class: 'muted' }, `${b.done} sur ${b.total} terminés. Cela peut prendre quelques minutes, vous pouvez rester sur cette page.`),
+        el('p', { class: 'muted' }, `${b.done} sur ${b.total} terminés. Cela peut prendre quelques minutes : vous pouvez rester sur cette page ou aller ailleurs.`),
         el('div', { class: 'progress' }, (() => { const i = el('i'); i.style.width = Math.max(6, Math.round((b.done / Math.max(1, b.total)) * 100)) + '%'; return i; })())));
+      return out;
     }
-    if (!b.running && b.notes && b.notes.length) out.push(el('div', { class: 'card' }, el('h2', {}, 'À savoir sur ce lot'), el('ul', { class: 'tasks' }, b.notes.map((e) => el('li', {}, e)))));
-    if (!b.running && b.errors.length) out.push(el('div', { class: 'card' }, el('h2', {}, 'Certains articles n\'ont pas pu être préparés'), el('ul', { class: 'tasks' }, b.errors.map((e) => el('li', {}, e)))));
+    if (b.total && !b.running && !P.items) out.push(el('div', { class: 'card' }, el('h2', {}, `Terminé : ${b.total - b.errors.length} sur ${b.total} rédigés`),
+      b.errors.length ? el('ul', { class: 'tasks' }, b.errors.map((e) => el('li', { class: 'warn' }, e))) : null,
+      b.notes && b.notes.length ? el('ul', { class: 'tasks' }, b.notes.map((e) => el('li', {}, e))) : null,
+      el('p', { class: 'muted' }, 'Les articles sont des brouillons ici, avec leur date prévue. Rien n\'est encore sur le site.'),
+      el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: () => go('articles') }, 'Relire et programmer'))));
+
+    const months = el('select', { id: 'm-months', 'aria-label': 'Nombre de mois' }, [1, 2, 3, 4, 5, 6].map((n) => el('option', { value: n }, n + (n > 1 ? ' mois' : ' mois'))));
+    const per = el('select', { id: 'm-per', 'aria-label': 'Articles par mois' }, [1, 2, 3].map((n) => el('option', { value: n }, n + (n > 1 ? ' articles par mois' : ' article par mois'))));
+    const start = el('input', { type: 'date', id: 'm-start', min: todayParis() });
+    months.value = P.months; per.value = P.perMonth; start.value = P.startDate;
+    const sync = () => { P.months = Number(months.value); P.perMonth = Number(per.value); P.startDate = start.value; };
+    [months, per, start].forEach((n) => n.addEventListener('change', sync));
+    const prepare = el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => {
+      sync(); P.err = '';
+      try { const r = await api('/write/plan', 'POST', { months: P.months, perMonth: P.perMonth, startDate: P.startDate }); P.items = r.items; P.missing = r.missing; } catch (e) { P.err = e.message; P.items = null; }
+      render();
+    }) }, 'Préparer le planning');
+    out.push(el('div', { class: 'card' }, el('h2', {}, 'Plusieurs articles d\'un coup'),
+      el('p', { class: 'muted' }, 'De 1 à 6 mois, avec 1 à 3 articles par mois. L\'outil propose un sujet et une date par article (vos sujets, dans l\'ordre). Vous pouvez tout modifier avant de lancer la rédaction.'),
+      el('div', { class: 'row' }, el('div', { class: 'grow-field' }, el('label', { for: 'm-months' }, 'Durée'), months), el('div', { class: 'grow-field' }, el('label', { for: 'm-per' }, 'Rythme'), per), el('div', { class: 'grow-field' }, el('label', { for: 'm-start' }, 'Premier article le'), start)),
+      el('div', { class: 'row btn-row' }, prepare),
+      P.err ? el('div', { class: 'alert mt' }, P.err) : null));
+
+    if (P.items) {
+      const rows = P.items.map((it, i) => {
+        const date = el('input', { type: 'date', value: it.plannedDate, min: todayParis(), 'aria-label': `Date de l'article ${i + 1}` });
+        const kw = el('input', { type: 'text', value: it.keyword, maxlength: 100, placeholder: 'Mot-clé à saisir', 'aria-label': `Mot-clé de l'article ${i + 1}` });
+        const city = el('input', { type: 'text', value: it.city || '', maxlength: 60, placeholder: 'Ville', 'aria-label': `Ville de l'article ${i + 1}` });
+        date.addEventListener('input', () => { it.plannedDate = date.value; }); kw.addEventListener('input', () => { it.keyword = kw.value; it.topicId = null; }); city.addEventListener('input', () => { it.city = city.value; });
+        return el('div', { class: 'plan-row' }, el('span', { class: 'plan-n' }, i + 1), date, kw, city);
+      });
+      out.push(el('div', { class: 'card' }, el('h2', {}, `Le planning : ${P.items.length} ${plural(P.items.length, 'article', 'articles')}`),
+        P.missing ? el('div', { class: 'alert' }, `Vous avez ${s.topics.length} ${plural(s.topics.length, 'sujet enregistré', 'sujets enregistrés')} pour ${P.items.length} articles : complétez les ${P.missing} ligne${P.missing > 1 ? 's' : ''} vide${P.missing > 1 ? 's' : ''} ci-dessous (deux articles sur le même mot-clé se font concurrence sur Google : variez-les).`) : null,
+        el('p', { class: 'muted small' }, 'Date de publication prévue, mot-clé, ville. Les articles sont publiés à 9 h (heure de Paris) le jour choisi, une fois programmés.'),
+        el('div', { class: 'plan' }, rows),
+        el('div', { class: 'row btn-row' },
+          el('button', { class: 'btn primary big', type: 'button', onclick: safe(async () => {
+            const missing = P.items.filter((it) => !it.keyword.trim()).length;
+            if (missing) { toast(`Complétez le mot-clé des ${missing} ligne${missing > 1 ? 's' : ''} vide${missing > 1 ? 's' : ''}.`, true); return; }
+            if (!demoOn() && !confirm(`Rédiger ${P.items.length} articles ? Cela fait ${P.items.length} appels payants à l'IA (quelques centimes chacun). Rien n'est envoyé sur le site.`)) return;
+            await api('/write/batch', 'POST', { items: P.items.map((it) => ({ topicId: it.topicId || undefined, keyword: it.keyword, city: it.city, plannedDate: it.plannedDate })) });
+            S.batch = { running: true, done: 0, total: P.items.length, errors: [], notes: [] }; P.items = null; render(); pollBatch();
+          }) }, icon('spark'), `Rédiger ces ${P.items.length} articles`),
+          el('button', { class: 'btn', type: 'button', onclick: () => { P.items = null; render(); } }, 'Annuler')),
+        el('p', { class: 'muted small' }, demoOn() ? 'Mode démonstration : textes de test, aucun appel réel.' : 'Chaque article est rédigé l\'un après l\'autre (environ une minute chacun). Ils arrivent dans « Articles », à relire.')));
+    }
+    return out;
+  }
+
+  async function pollBatch() {
+    clearTimeout(pollTimer);
+    try {
+      const b = await api('/write/status');
+      const was = S.batch.running;
+      S.batch = b;
+      if (b.running) pollTimer = setTimeout(pollBatch, 2500);
+      else if (was || b.total) { await refresh(); toast(b.errors.length ? 'Terminé, avec des erreurs.' : 'Vos articles sont rédigés : relisez-les puis programmez-les.', !!b.errors.length); }
+      if (['write', 'home'].includes(S.view)) render(); else renderNav();
+    } catch { /* on réessaiera */ }
+  }
+
+  // ---------- Articles ----------
+  function articleRow(a) {
+    const when = a.status === 'programme' ? 'Publication : ' + fmtDateTime(a.scheduledAt) : a.plannedDate && a.status !== 'publie' ? 'Date prévue : ' + fmtDay(a.plannedDate) : '';
+    return el('button', { class: 'art-row', type: 'button', onclick: () => go('article', a.id) },
+      el('div', { class: 'grow' }, el('div', { class: 't' }, a.title), el('div', { class: 'm' }, a.keyword + (a.city ? ' à ' + a.city : '') + ' · ' + a.check.words + ' mots' + (when ? ' · ' + when : ''))),
+      a.simulated ? el('span', { class: 'pill' }, 'Démonstration') : null,
+      el('span', { class: 'pill ' + a.state.tone }, a.state.label));
+  }
+
+  function viewArticles() {
+    const demoCount = S.articles.filter((a) => a.simulated).length;
+    const m = mine();
+    const planned = m.filter((a) => a.plannedDate && ['a_relire', 'brouillon_wp'].includes(a.status));
+    const out = [head('Articles', 'Tout ce qui est rédigé : à relire, programmé ou publié.', el('button', { class: 'btn primary big', type: 'button', onclick: () => go('write') }, icon('spark'), 'Rédiger'))];
+
+    if (planned.length) {
+      out.push(el('div', { class: 'card' }, el('h2', {}, `${planned.length} ${plural(planned.length, 'article a', 'articles ont')} une date prévue`),
+        el('p', { class: 'muted' }, 'Relisez-les (et corrigez à la main si besoin), puis programmez-les : WordPress les publiera tout seul à la date prévue, à 9 h. Un article avec un problème de longueur, un mot interdit ou une source à compléter est laissé de côté, avec la raison.'),
+        el('div', { class: 'actions' }, el('button', { class: 'btn primary big', type: 'button', onclick: safe(scheduleAll) }, icon('send'), 'Programmer tous les articles prêts'))));
+    }
+    if (S.scheduleReport) {
+      const r = S.scheduleReport;
+      out.push(el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Résultat de la programmation'), el('button', { class: 'btn ghost', type: 'button', onclick: () => { S.scheduleReport = null; render(); } }, 'Fermer')),
+        r.scheduled.length ? el('p', { class: 'ok-text' }, `${r.scheduled.length} ${plural(r.scheduled.length, 'article programmé', 'articles programmés')}.`) : null,
+        r.skipped.length ? [el('p', {}, `${r.skipped.length} ${plural(r.skipped.length, 'article laissé de côté', 'articles laissés de côté')} :`), el('ul', { class: 'tasks' }, r.skipped.map((x) => el('li', { class: 'warn' }, el('b', {}, x.title), ' : ', x.reasons.join(' '), ' ', el('button', { class: 'btn', type: 'button', onclick: () => go('article', x.id) }, 'Ouvrir'))))] : null));
+    }
 
     if (!demoOn() && demoCount) out.push(el('div', { class: 'alert' }, `${demoCount} ${plural(demoCount, 'article de démonstration reste', 'articles de démonstration restent')} dans la liste (créés avant le passage en mode réel). Ils n'existent pas sur votre site. `,
       el('button', { class: 'btn', type: 'button', onclick: safe(async () => { if (!confirm('Supprimer les articles de démonstration ? Cela ne touche pas à votre site.')) return; const r = await api('/articles/purge-demo', 'POST'); await refresh(); render(); toast(`${r.removed} supprimé${r.removed > 1 ? 's' : ''}.`); }) }, 'Les supprimer')));
-    if (demoOn() && S.articles.some((a) => !a.simulated)) out.push(el('div', { class: 'alert' }, 'Vos articles réels sont visibles, mais ne peuvent être ni publiés ni supprimés tant que le mode démonstration est actif.'));
+    if (demoOn() && S.articles.some((a) => !a.simulated)) out.push(el('div', { class: 'alert' }, 'Vos articles réels sont visibles, mais ne peuvent être ni publiés, ni programmés, ni supprimés tant que le mode démonstration est actif.'));
 
     const list = el('div', {});
     if (!S.articles.length) {
-      list.append(el('div', { class: 'card empty' }, icon('file'), el('h3', {}, 'Aucun article pour l\'instant'),
-        el('p', { class: 'muted' }, s.topics.length ? 'Cliquez sur « Rédiger les articles du mois », ou sur « Essayer un article » pour juger la qualité d\'abord.' : 'Ajoutez d\'abord des sujets dans Réglages, Rédaction.')));
+      list.append(el('div', { class: 'card empty' }, icon('file'), el('h3', {}, 'Aucun article pour l\'instant'), el('p', { class: 'muted' }, 'Cliquez sur « Rédiger » pour écrire un article, ou plusieurs d\'un coup.')));
     } else {
-      S.articles.forEach((a) => {
-        list.append(el('button', { class: 'art-row', type: 'button', onclick: () => go('article', a.id) },
-          el('div', { class: 'grow' }, el('div', { class: 't' }, a.title),
-            el('div', { class: 'm' }, a.keyword + (a.city ? ' à ' + a.city : '') + ' · ' + a.check.words + ' mots · ' + fmtDate(a.createdAt) + (a.status === 'a_relire' ? ' · pas encore envoyé sur le site' : ''))),
-          a.simulated ? el('span', { class: 'pill' }, 'Démonstration') : null,
-          a.essai ? el('span', { class: 'pill warn' }, 'Essai') : null,
-          el('span', { class: 'pill ' + a.state.tone }, a.state.label)));
-      });
+      const order = { programme: 0, a_relire: 1, brouillon_wp: 1, publie: 2 };
+      [...S.articles].sort((x, y) => (order[x.status] - order[y.status]) || ((x.scheduledAt || x.plannedDate || x.createdAt).localeCompare(y.scheduledAt || y.plannedDate || y.createdAt))).forEach((a) => list.append(articleRow(a)));
     }
     out.push(list);
+
+    const pubs = S.publications || [];
+    out.push(el('details', { class: 'faq' }, el('summary', {}, `Historique des publications (${pubs.length})`), el('div', { class: 'a' },
+      pubs.length ? el('div', { class: 'tablewrap' }, el('table', { class: 't' }, el('tr', {}, ['Date', 'Action', 'Titre', 'Adresse'].map((h) => el('th', {}, h))),
+        pubs.map((p) => el('tr', {}, el('td', {}, fmtDateTime(p.at)), el('td', {}, { publication: p.by === 'programmation' ? 'Publié par programmation' : 'Publié', programmation: 'Programmé', annulation: 'Programmation annulée' }[p.kind] || p.kind), el('td', {}, p.title), el('td', {}, p.url && !p.simulated ? el('a', { href: p.url, target: '_blank', rel: 'noopener noreferrer' }, p.url) : (p.simulated ? 'démonstration' : '')))))) : el('p', { class: 'muted small' }, 'Rien pour l\'instant.'),
+      el('p', { class: 'muted small' }, 'Sur l\'hébergement gratuit sans disque, ce journal est effacé à un redémarrage du serveur.'))));
     return out;
+  }
+
+  async function scheduleAll() {
+    const facts = mine().filter((a) => a.plannedDate && ['a_relire', 'brouillon_wp'].includes(a.status) && a.faitsAVerifier.length).length;
+    if (!confirm('Programmer tous les articles prêts à leur date prévue (9 h) ?')) return;
+    let acceptFacts = false;
+    if (facts) acceptFacts = confirm(`${facts} ${plural(facts, 'article a', 'articles ont')} encore des « faits à vérifier » dans leur liste.\n\nOK : les programmer quand même (vous aurez vérifié les chiffres).\nAnnuler : les laisser de côté pour les relire d'abord.`);
+    S.scheduleReport = await api('/articles/schedule-all', 'POST', { acceptFacts });
+    await refresh(); render();
   }
 
   function highlightMarkers(root) {
@@ -328,13 +403,8 @@
     });
   }
 
-  // Appelle une route d'envoi ou de publication, avec les confirmations demandées par le serveur (hors plage, essai).
-  async function withConfirms(a, path, body) {
-    const extra = {};
-    if (!a.check.inRange) { if (!askLength(a.check)) return null; extra.confirmOutOfRange = true; }
-    if (a.essai && path.endsWith('/publish')) { if (!confirm('Cet article est marqué « essai ». Le publier quand même ?')) return null; extra.confirmEssai = true; }
-    return api(path, 'POST', { ...body, ...extra });
-  }
+
+  const lengthMsg = (c) => `Cet article compte ${c.words} mots : il en faut entre ${c.limits.min} et ${c.limits.max}. Il n'est ni envoyé ni programmé sans votre confirmation.`;
 
   async function regenerate(a) {
     if (!confirm('Régénérer cet article ? Un nouveau texte est rédigé pour le même sujet. L\'ancien reste dans l\'historique (écran « Modifier »).')) return;
@@ -353,95 +423,121 @@
     const a = S.articles.find((x) => x.id === S.articleId);
     if (!a) { go('articles'); return []; }
     const c = a.check;
-    const stage = { a_relire: 1, brouillon_wp: 2, publie: 3 }[a.status];
-    const stepper = el('div', { class: 'stepper' }, ['Rédigé', 'Envoyé sur le site (brouillon)', 'Relu et validé', 'Publié'].map((t, i) => {
-      const state = a.status === 'publie' ? 'done' : (i < stage + 0 ? 'done' : i === stage ? 'now' : '');
+    const stage = { a_relire: 1, brouillon_wp: 2, programme: 3, publie: 4 }[a.status];
+    const stepper = el('div', { class: 'stepper' }, ['Rédigé', 'Brouillon sur le site', 'Programmé', 'Publié'].map((t, i) => {
+      const state = i < stage ? 'done' : i === stage ? 'now' : '';
       return el('div', { class: 's ' + state }, el('span', { class: 'n' }, state === 'done' ? icon('check') : i + 1), t);
     }));
 
-    const preview = el('div', { class: 'preview' });
-    preview.innerHTML = a.htmlContent; // HTML assaini côté serveur (balises autorisées uniquement)
-    highlightMarkers(preview);
-
-    const wp = safeUrl(a.wpLink);
+    const preview = previewOf(a.htmlContent);
+    const wpUrl = safeUrl(a.wpLink);
     const mismatch = !!a.simulated !== demoOn(); // créé dans l'autre mode (démonstration/réel)
     const reload = async () => { await refresh(); render(); };
     const busy = S.regen === a.id;
-    const regenBtn = el('button', { class: 'btn' + (!c.inRange ? ' primary' : ''), type: 'button', disabled: busy ? true : false, onclick: safe(() => regenerate(a)) }, icon('refresh'), busy ? 'Rédaction en cours...' : 'Régénérer');
+    const regenBtn = () => el('button', { class: 'btn' + (!c.inRange ? ' primary' : ''), type: 'button', disabled: busy ? true : false, onclick: safe(() => regenerate(a)) }, icon('refresh'), busy ? 'Rédaction en cours...' : 'Régénérer');
     const editBtn = el('button', { class: 'btn', type: 'button', onclick: () => go('edit', a.id) }, icon('file'), 'Modifier');
+
+    // Programmer : une date, une heure (9 h par défaut), un bouton.
+    const scheduleBlock = (label) => {
+      const d = el('input', { type: 'date', id: 'sc-date', min: plusDays(todayParis(), 0), 'aria-label': 'Date de publication' });
+      const t = el('input', { type: 'time', id: 'sc-time', value: '09:00', 'aria-label': 'Heure de publication (heure de Paris)' });
+      d.value = a.status === 'programme' && a.scheduledAt ? new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris' }).format(new Date(a.scheduledAt)) : (a.plannedDate && a.plannedDate > todayParis() ? a.plannedDate : plusDays(todayParis(), 1));
+      return el('div', { class: 'sched' }, el('h3', {}, label),
+        el('div', { class: 'row' }, d, t),
+        el('p', { class: 'muted small' }, 'Heure de Paris. WordPress publie l\'article tout seul à ce moment : l\'outil n\'a pas besoin d\'être ouvert.'),
+        el('div', { class: 'actions' }, el('button', { class: 'btn primary big', type: 'button', onclick: safe(async () => {
+          if (!d.value) { toast('Choisissez une date.', true); return; }
+          const r = await confirmed(`/articles/${a.id}/schedule`, { date: d.value, time: t.value });
+          if (r) { toast('Article programmé : ' + fmtDateTime(r.scheduledAt) + '.'); await reload(); }
+        }) }, icon('send'), a.status === 'programme' ? 'Changer la date' : 'Programmer')));
+    };
+    const publishNow = () => {
+      const chk = el('input', { type: 'checkbox', id: 'validated' });
+      const pub = el('button', { class: 'btn', type: 'button', disabled: true, onclick: safe(async () => { const r = await confirmed(`/articles/${a.id}/publish`, { validated: true }); if (r) { toast('Article publié sur votre site.'); await reload(); } }) }, icon('check'), 'Publier maintenant');
+      chk.addEventListener('change', () => { pub.disabled = !chk.checked; });
+      return el('div', { class: 'sched' }, el('h3', {}, 'Ou publier tout de suite'), el('label', { class: 'check', for: 'validated' }, chk, el('span', {}, 'J\'ai relu et validé cet article')), el('div', { class: 'actions' }, pub));
+    };
 
     const actions = el('div', { class: 'card sticky' });
     if (mismatch && a.status !== 'publie') {
-      add(actions, el('div', { class: 'alert' }, `Cet article a été créé en mode ${a.simulated ? 'démonstration' : 'réel'}. Pour le ${a.status === 'a_relire' ? 'envoyer' : 'publier'}, repassez en mode ${a.simulated ? 'démonstration' : 'réel'} (Réglages, Connexions).`));
+      add(actions, el('div', { class: 'alert' }, `Cet article a été créé en mode ${a.simulated ? 'démonstration' : 'réel'}. Pour le modifier sur le site, repassez en mode ${a.simulated ? 'démonstration' : 'réel'} (Réglages, Connexions).`));
     } else if (a.status === 'a_relire') {
-      add(actions, el('div', { class: 'eyebrow' }, 'Étape suivante'), el('h2', {}, 'Envoyer sur votre site'),
-        el('p', { class: 'muted small' }, 'L\'article arrive en brouillon dans WordPress. Il n\'est pas visible du public.'),
-        a.autoDraftSkipped === 'length' ? el('div', { class: 'alert' }, 'Il n\'a pas été envoyé automatiquement : sa longueur est hors de la plage demandée.') : null,
-        el('div', { class: 'actions' }, el('button', { class: 'btn primary big', type: 'button', onclick: safe(async () => { const r = await withConfirms(a, `/articles/${a.id}/send`, {}); if (r) { toast('Brouillon créé sur votre site.'); await reload(); } }) }, icon('send'), 'Envoyer en brouillon')));
+      add(actions, el('div', { class: 'eyebrow' }, 'Étape suivante'), el('h2', {}, 'Cet article est en attente'),
+        el('p', { class: 'muted small' }, 'Il n\'est pas encore sur votre site. Relisez-le, puis choisissez :'),
+        el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { const r = await confirmed(`/articles/${a.id}/send`, {}); if (r) { toast('Brouillon créé sur votre site (invisible du public).'); await reload(); } }) }, icon('send'), 'Envoyer en brouillon sur le site')),
+        scheduleBlock('Programmer la publication'));
     } else if (a.status === 'brouillon_wp') {
-      const chk = el('input', { type: 'checkbox', id: 'validated' });
-      const pub = el('button', { class: 'btn primary big', type: 'button', disabled: true, onclick: safe(async () => { const r = await withConfirms(a, `/articles/${a.id}/publish`, { validated: true }); if (r) { toast('Article publié sur votre site.'); await reload(); } }) }, icon('check'), 'Publier sur le site');
-      chk.addEventListener('change', () => { pub.disabled = !chk.checked; });
-      add(actions, el('div', { class: 'eyebrow' }, 'Dernière étape'), el('h2', {}, 'Publier l\'article'),
-        el('p', { class: 'muted small' }, 'Le brouillon est sur votre site, pas encore visible. Vous pouvez encore le modifier ici ou dans WordPress.'),
+      add(actions, el('div', { class: 'eyebrow' }, 'Dernière étape'), el('h2', {}, 'Brouillon sur votre site'),
+        el('p', { class: 'muted small' }, 'Il est sur votre site mais invisible du public. Vous pouvez encore le modifier ici ou dans WordPress.'),
         a.siteDirty ? el('div', { class: 'alert' }, 'Vos dernières modifications ne sont pas encore envoyées sur le site. Ouvrez « Modifier » et enregistrez à nouveau.') : null,
-        wp && !a.simulated ? el('p', {}, el('a', { class: 'btn', href: wp, target: '_blank', rel: 'noopener noreferrer' }, icon('ext'), 'Ouvrir dans WordPress')) : null,
-        el('label', { class: 'check', for: 'validated' }, chk, el('span', {}, 'J\'ai relu et validé cet article')),
-        el('div', { class: 'actions' }, pub));
+        wpUrl && !a.simulated ? el('p', {}, el('a', { class: 'btn', href: wpUrl, target: '_blank', rel: 'noopener noreferrer' }, icon('ext'), 'Ouvrir dans WordPress')) : null,
+        scheduleBlock('Programmer la publication'), publishNow());
+    } else if (a.status === 'programme') {
+      add(actions, el('div', { class: 'eyebrow' }, 'Programmé'), el('h2', {}, a.state.label),
+        a.state.code === 'programme_retard' ? el('div', { class: 'alert' }, 'La date est passée mais WordPress ne l\'a pas encore publié. Vérifiez dans WordPress que la planification fonctionne (elle se déclenche quand quelqu\'un visite le site).') : el('p', { class: 'muted small' }, 'WordPress le publiera tout seul. Vous pouvez encore le modifier ici.'),
+        wpUrl && !a.simulated ? el('p', {}, el('a', { class: 'btn', href: wpUrl, target: '_blank', rel: 'noopener noreferrer' }, icon('ext'), 'Ouvrir dans WordPress')) : null,
+        scheduleBlock('Changer la date'),
+        el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await api(`/articles/${a.id}/unschedule`, 'POST'); toast('Programmation annulée : l\'article redevient un brouillon.'); await reload(); }) }, 'Annuler la programmation')),
+        publishNow());
     } else {
-      add(actions, el('div', { class: 'alert ok' }, 'Cet article est publié sur votre site' + (a.publishedBy === 'automatique' ? ' (publication automatique).' : '.')), wp ? el('p', {}, el('a', { class: 'btn', href: wp, target: '_blank', rel: 'noopener noreferrer' }, icon('ext'), 'Voir l\'article')) : null);
+      add(actions, el('div', { class: 'alert ok' }, 'Cet article est publié sur votre site' + (a.publishedBy === 'programmation' ? ' (publié à la date programmée).' : '.')), wpUrl ? el('p', {}, el('a', { class: 'btn', href: wpUrl, target: '_blank', rel: 'noopener noreferrer' }, icon('ext'), 'Voir l\'article')) : null);
     }
     if (a.status !== 'publie') {
-      add(actions, el('div', { class: 'actions' }, editBtn, regenBtn));
+      add(actions, el('div', { class: 'actions' }, editBtn, regenBtn()));
       if (a.simulated || !mismatch) add(actions, el('div', { class: 'actions' }, el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => {
-        if (!confirm(a.status === 'brouillon_wp' ? 'Supprimer ce brouillon, aussi sur votre site ?' : 'Supprimer cet article ?')) return;
+        if (!confirm(a.status === 'a_relire' ? 'Supprimer cet article ?' : 'Supprimer cet article, aussi sur votre site ?')) return;
         await api('/articles/' + a.id, 'DELETE'); toast('Article supprimé.'); await refresh(); go('articles');
-      }) }, icon('trash'), 'Supprimer ce brouillon')));
+      }) }, icon('trash'), 'Supprimer')));
+    }
+
+    // Date prévue (planning)
+    let planned = null;
+    if (a.status !== 'publie') {
+      const pd = el('input', { type: 'date', id: 'pl-date', min: todayParis(), 'aria-label': 'Date prévue' });
+      pd.value = a.plannedDate || '';
+      planned = el('div', { class: 'card' }, el('h2', {}, 'Date prévue'), el('p', { class: 'muted small' }, 'Un simple pense-bête : elle sert à « Programmer tous les articles prêts ». Elle ne programme rien toute seule.'),
+        el('div', { class: 'row' }, pd, el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await api(`/articles/${a.id}/planned`, 'PUT', { plannedDate: pd.value }); toast(pd.value ? 'Date prévue enregistrée.' : 'Date prévue retirée.'); await reload(); }) }, 'Enregistrer')));
     }
 
     // Contrôles : longueur, mots interdits, sources, faits à vérifier...
     const checks = el('div', { class: 'card' }, el('h2', {}, 'À vérifier avant de publier'));
-    if (!c.inRange) add(checks, el('div', { class: 'alert' }, lengthMsg(c), a.status !== 'publie' ? el('div', { class: 'actions' }, regenBtn.cloneNode(true)) : null));
+    if (!c.inRange) add(checks, el('div', { class: 'alert' }, lengthMsg(c), a.status !== 'publie' ? el('div', { class: 'actions' }, regenBtn()) : null));
     const others = c.issues.filter((i) => i.code !== 'length');
     if (others.length) add(checks, el('ul', { class: 'tasks' }, others.map((i) => el('li', { class: i.blocking ? 'warn' : 'muted' }, i.message))));
     else if (c.inRange) add(checks, el('p', { class: 'muted' }, 'Rien à signaler. Relisez quand même chaque phrase.'));
     if (a.faitsAVerifier.length) add(checks, el('h3', {}, 'Faits à vérifier'), el('ul', { class: 'tasks' }, a.faitsAVerifier.map((f) => el('li', {}, f))));
-    if (!c.inRange && a.status !== 'publie') { const cl = checks.querySelector('.alert button'); if (cl) cl.addEventListener('click', safe(() => regenerate(a))); }
 
-    // Publication automatique prévue
-    let auto = null;
-    if (a.auto) {
-      auto = el('div', { class: 'card' }, el('h2', {}, 'Publication automatique'));
-      if (!a.auto.active) add(auto, el('p', { class: 'muted' }, 'Le mode automatique n\'est plus actif pour cet article : il ne sera pas publié seul.'));
-      else if (a.auto.cancelled) add(auto, el('div', { class: 'alert' }, 'La publication automatique est annulée pour cet article.'), el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await api(`/articles/${a.id}/cancel-auto`, 'POST', { cancelled: false }); await reload(); }) }, 'Reprogrammer')));
-      else {
-        add(auto, el('p', {}, a.auto.scheduledAt ? `Publication possible à partir du ${fmtDateTime(a.auto.scheduledAt)}, si tout est en règle.` : 'La date sera fixée dès l\'envoi sur le site.'),
-          a.auto.paused ? el('div', { class: 'alert' }, 'Les publications automatiques sont suspendues (« Tout arrêter »).') : null,
-          a.auto.blockers.length ? el('div', { class: 'alert' }, 'Il ne sera pas publié seul tant que :', el('ul', { class: 'tasks' }, a.auto.blockers.map((r) => el('li', {}, r)))) : el('p', { class: 'muted small' }, 'Toutes les conditions sont remplies pour le moment.'),
-          el('div', { class: 'actions' }, el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => { await api(`/articles/${a.id}/cancel-auto`, 'POST', {}); toast('Publication automatique annulée pour cet article.'); await reload(); }) }, 'Annuler la publication automatique')));
-      }
+    // Yoast : ce qui est réellement parti sur le site
+    let yoast = null;
+    if (a.wpId && !a.simulated) {
+      yoast = el('div', { class: 'card' }, el('h2', {}, 'Yoast SEO'),
+        a.yoast ? el('p', { class: 'ok-text' }, 'Mot-clé principal, titre SEO et description ont été envoyés à Yoast.')
+          : el('div', { class: 'alert' }, 'Le mot-clé principal, le titre SEO et la description n\'ont PAS été transmis à Yoast : le site ne les accepte pas encore. Installez le petit extrait de code (Réglages, Connexions, « Yoast SEO »), puis enregistrez à nouveau l\'article (« Modifier », « Enregistrer »).'));
     }
 
-    const count = (n, max) => el('div', { class: 'count' + (n > max ? ' bad' : ' muted') }, `${n} caractères sur ${max} conseillés${n > max ? ' : trop long, à raccourcir' : ''}`);
+    const count = (n, max) => el('div', { class: 'count' + (n > max ? ' bad' : ' muted'), }, `${n} caractères sur ${max} conseillés${n > max ? ' : trop long, à raccourcir' : ''}`);
     const slugUrl = ((S.status.siteUrl || 'https://citylock.fr').replace(/^https?:\/\//, '')) + ' › ' + a.slug;
     const serp = el('div', { class: 'card' }, el('h2', {}, 'Aperçu dans Google'),
-      el('p', { class: 'muted small' }, 'Titre et description affichés dans les résultats. À recopier dans l\'extension SEO de WordPress.'),
+      el('p', { class: 'muted small' }, 'Titre et description affichés dans les résultats' + (a.yoast ? ' (déjà dans Yoast).' : '.')),
       el('div', { class: 'serp' }, el('div', { class: 'u' }, slugUrl), el('div', { class: 'tt' }, a.metaTitle), el('div', { class: 'dd' }, a.metaDescription)),
-      count(a.metaTitle.length, 60), count(a.metaDescription.length, 155));
+      count(a.metaTitle.length, 60), count(a.metaDescription.length, 155),
+      el('p', { class: 'muted small' }, 'Mot-clé principal : ', el('b', {}, a.keyword)));
 
-    const links = a.internalLinkSuggestions.length ? el('div', { class: 'card' }, el('h2', {}, 'Pages du site à relier'), el('ul', { class: 'tasks' }, a.internalLinkSuggestions.map((l) => el('li', {}, l)))) : null;
+    // Liens du texte : on montre où ils mènent vraiment.
+    const ls = linksOf(a.htmlContent);
+    const linksCard = el('div', { class: 'card' }, el('h2', {}, 'Liens dans le texte'),
+      ls.length ? [el('p', { class: 'muted small' }, 'Cliquez pour vérifier : chaque lien s\'ouvre sur votre site, dans un nouvel onglet.'), el('ul', { class: 'tasks' }, ls.map((l) => el('li', {}, el('a', { href: l.href, target: '_blank', rel: 'noopener noreferrer' }, l.text || l.href), el('div', { class: 'muted small' }, l.href))))]
+        : el('p', { class: 'muted small' }, 'Aucun lien dans le texte. Vous pouvez en ajouter dans « Modifier ».'));
 
     return [
       el('button', { class: 'btn ghost', type: 'button', onclick: () => go('articles') }, icon('back'), 'Retour aux articles'),
       head(a.title, a.keyword + (a.city ? ' à ' + a.city : '') + ' · ' + c.words + ' mots'),
-      el('div', { class: 'state-line' }, el('span', { class: 'pill big ' + a.state.tone }, a.state.label),
-        a.status === 'a_relire' ? el('span', { class: 'muted small' }, 'Pas encore envoyé sur le site') : null,
-        a.simulated ? el('span', { class: 'pill' }, 'Démonstration') : null, a.essai ? el('span', { class: 'pill warn' }, 'Essai') : null, modelTag(a.modelUsed),
+      el('div', { class: 'state-line' }, el('span', { class: 'pill big ' + a.state.tone }, a.state.label), a.simulated ? el('span', { class: 'pill' }, 'Démonstration') : null, modelTag(a.modelUsed),
         a.versionsCount ? el('span', { class: 'muted small' }, `${a.versionsCount} ${plural(a.versionsCount, 'version précédente', 'versions précédentes')}`) : null),
       stepper,
       el('div', { class: 'detail' },
         el('div', { class: 'col' }, el('div', { class: 'card post' }, el('h1', { class: 'post-title' }, a.title), preview)),
-        el('div', { class: 'col side-col' }, actions, checks, auto, serp, links)),
+        el('div', { class: 'col side-col' }, actions, planned, checks, yoast, serp, linksCard)),
     ];
   }
 
@@ -461,9 +557,9 @@
     const prevInfo = el('div', {});
     const setPreview = (p) => {
       prevBox.innerHTML = p.html; // assaini par le serveur
-      highlightMarkers(prevBox);
+      highlightMarkers(prevBox); fixLinks(prevBox);
       prevInfo.replaceChildren(
-        el('p', { class: 'muted small' }, `${p.check.words} ${plural(p.check.words, 'mot', 'mots')} (visé : 600 à 900).`),
+        el('p', { class: 'muted small' }, `${p.check.words} ${plural(p.check.words, 'mot', 'mots')} (visé : ${p.check.limits.min} à ${p.check.limits.max}).`),
         p.check.issues.length ? el('ul', { class: 'tasks' }, p.check.issues.map((i) => el('li', { class: i.blocking ? 'warn' : 'muted' }, i.message))) : el('p', { class: 'ok-text' }, 'Aucun problème détecté.'));
     };
     let timer = null;
@@ -521,18 +617,18 @@
       await finish(r, r.unchanged ? 'Aucune modification à enregistrer.' : 'Modifications enregistrées.');
     });
 
-    const onSite = a.status === 'brouillon_wp' && !a.simulated;
+    const onSite = ['brouillon_wp', 'programme'].includes(a.status) && !a.simulated;
     return [
       el('button', { class: 'btn ghost', type: 'button', onclick: () => { S.edit = null; go('article', a.id); } }, icon('back'), 'Retour à l\'article sans enregistrer'),
       head('Modifier l\'article', 'Corrigez le texte à la main. Rien n\'est publié : seul le brouillon est mis à jour.'),
       el('div', { class: 'state-line' }, el('span', { class: 'pill big ' + a.state.tone }, a.state.label), modelTag(a.modelUsed)),
-      onSite ? el('div', { class: 'alert' }, 'Cet article est déjà un brouillon sur votre site : en enregistrant, le brouillon est mis à jour. Si le texte a été modifié directement dans WordPress, on vous demandera confirmation avant de l\'écraser.') : null,
+      onSite ? el('div', { class: 'alert' }, 'Cet article est déjà sur votre site : en enregistrant, la version du site (brouillon ou article programmé) est mise à jour. Si le texte a été modifié directement dans WordPress, on vous demandera confirmation avant de l\'écraser.') : null,
       el('div', { class: 'detail editor' },
         el('div', { class: 'col' },
           el('div', { class: 'card' }, el('h2', {}, 'Titre et mot-clé'),
             ...input('ed-title', 'title', 'Titre de l\'article', 'Le titre affiché en haut de la page.', 200),
-            ...input('ed-kw', 'keyword', 'Mot-clé principal', 'Le sujet que l\'article doit travailler.', 100)),
-          el('div', { class: 'card' }, el('h2', {}, 'Ce qui s\'affiche dans Google'),
+            ...input('ed-kw', 'keyword', 'Mot-clé principal', 'Le mot-clé que l\'article doit travailler : il est transmis à Yoast comme « mot-clé principal ».', 100)),
+          el('div', { class: 'card' }, el('h2', {}, 'Ce qui s\'affiche dans Google (et dans Yoast)'),
             ...input('ed-mt', 'metaTitle', 'Titre pour Google', '60 caractères au maximum.', 300),
             ...area('ed-md', 'metaDescription', 'Description pour Google', '155 caractères au maximum.', 3),
             ...input('ed-slug', 'slug', 'Adresse de la page', 'La fin de l\'adresse, en minuscules et avec des tirets (exemple : alarme-sans-fil).', 80)),
@@ -550,24 +646,6 @@
             prevInfo, prevBox),
           el('div', { class: 'card' }, el('h2', {}, 'Historique des versions'), el('p', { class: 'muted small' }, 'Chaque enregistrement garde la version d\'avant. Restaurer une version garde aussi l\'état actuel.'), versionsBox))),
     ];
-  }
-
-  async function startBatch() {
-    await api('/articles/batch', 'POST');
-    S.batch = { running: true, done: 0, total: 1, errors: [] };
-    render();
-    pollBatch();
-  }
-  async function pollBatch() {
-    clearTimeout(pollTimer);
-    try {
-      const b = await api('/articles/batch/status');
-      const was = S.batch.running;
-      S.batch = b;
-      if (b.running) pollTimer = setTimeout(pollBatch, 2500);
-      else if (was || b.total) { await refresh(); toast(b.errors.length ? 'Terminé, avec des erreurs.' : 'Vos articles sont prêts à relire.', !!b.errors.length); }
-      if (['articles', 'home'].includes(S.view)) render(); else renderNav();
-    } catch { /* on réessaiera */ }
   }
 
   // ---------- Score ----------
@@ -697,12 +775,8 @@
 
   // ---------- Réglages ----------
   async function saveSettings(patch, msg) {
-    const s = { ...S.settings, ...patch };
-    const payload = { frequency: Number(s.frequency), brandName: s.brandName, zone: s.zone, autoDraft: s.autoDraft };
-    for (const k of ['systemPrompt', 'simulate', 'publishMode', 'confirmAutomatic', 'autoPublishDelayDays', 'autoPublishMaxPerWeek']) if (k in patch) payload[k] = patch[k];
-    S.settings = await api('/settings', 'PUT', payload);
+    S.settings = await api('/settings', 'PUT', patch);
     S.status = await api('/status');
-    await refreshPlan();
     if (msg) toast(msg);
   }
   // Clés et identifiants : on peut les remplacer ou les effacer, jamais les relire.
@@ -711,8 +785,6 @@
     S.status = await api('/status');
     if (msg) toast(msg);
   }
-  S.settingsTab = 'connexions';
-  S.msgs = {};
   const setMsg = (k, tone, text) => { S.msgs[k] = { tone, text }; };
   const msgBox = (k) => (S.msgs[k] ? el('div', { class: 'alert mt' + (S.msgs[k].tone === 'ok' ? ' ok' : '') }, S.msgs[k].text) : null);
   const hint = (t) => el('p', { class: 'muted small hint' }, t); // explication de deux lignes maximum sous chaque réglage
@@ -725,18 +797,100 @@
   }
   const secretInput = (id, st, empty) => el('input', { type: 'password', id, autocomplete: 'new-password', spellcheck: 'false', placeholder: st.set ? '•••••••• enregistrée (vide = inchangée)' : empty });
 
-  function tabsBar() {
-    const items = [['connexions', 'Connexions'], ['ia', 'Rédaction'], ['publication', 'Publication']];
-    return el('div', { class: 'seg', role: 'tablist' }, items.map(([id, label]) => el('button', { type: 'button', role: 'tab', class: S.settingsTab === id ? 'on' : '', 'aria-selected': S.settingsTab === id ? 'true' : 'false', onclick: () => { S.settingsTab = id; render(); } }, label)));
-  }
-
   function viewSettings() {
-    const t = S.settingsTab;
-    return [head('Réglages', 'Tout se gère ici. Connexions : les services reliés. Rédaction : comment les articles sont écrits. Publication : ce qui arrive ensuite.'), tabsBar(),
-      ...(t === 'ia' ? settingsIa() : t === 'publication' ? settingsPublication() : settingsConnexions())];
+    const items = [['redaction', 'Rédaction'], ['connexions', 'Connexions']];
+    const bar = el('div', { class: 'seg', role: 'tablist' }, items.map(([id, label]) => el('button', { type: 'button', role: 'tab', class: S.settingsTab === id ? 'on' : '', 'aria-selected': S.settingsTab === id ? 'true' : 'false', onclick: () => { S.settingsTab = id; render(); } }, label)));
+    return [head('Réglages', 'Rédaction : le prompt, le modèle, les sujets. Connexions : WordPress, clé OpenRouter, Yoast.'), bar, ...(S.settingsTab === 'connexions' ? settingsConnexions() : settingsRedaction())];
   }
 
-  // ----- Connexions : mise en route, mode démonstration, WordPress, clé de rédaction, PageSpeed -----
+  // ----- Rédaction : le prompt (unique), le modèle, la longueur, les sujets, l'entreprise -----
+  function settingsRedaction() {
+    const s = S.settings, D = S.aiDefaults;
+
+    // Le prompt : la seule consigne envoyée à l'IA. Aucun texte caché dans le code.
+    const prompt = el('textarea', { id: 'prompt', rows: 22, maxlength: D.maxLength, class: 'mono', 'aria-label': 'Prompt de rédaction', spellcheck: 'false' });
+    prompt.value = s.systemPrompt;
+    const count = el('div', { class: 'count muted' });
+    const warn = el('div', {});
+    const upd = () => {
+      const v = prompt.value;
+      count.textContent = `${v.length} caractères sur ${D.maxLength}` + (v.trim() === D.systemPrompt.trim() ? ' · texte d\'origine' : v.trim() === s.systemPrompt.trim() ? ' · enregistré' : ' · modifié, pas encore enregistré');
+      const probs = [];
+      if (!/json/i.test(v)) probs.push('Le mot « JSON » n\'apparaît pas : l\'IA ne saura pas répondre dans le bon format.');
+      for (const k of ['title', 'htmlContent']) if (!v.includes(k)) probs.push(`La clé « ${k} » n'apparaît pas dans le format de réponse.`);
+      if (!/\d+\s*(à|et|-)\s*\d+\s*mots/i.test(v)) probs.push('Aucune longueur n\'est demandée (par exemple « entre 600 et 900 mots ») : les articles risquent d\'être trop courts.');
+      warn.replaceChildren(...(probs.length ? [el('div', { class: 'alert mt' }, el('b', {}, 'À corriger : '), el('ul', { class: 'tasks' }, probs.map((p) => el('li', {}, p))))] : []));
+    };
+    prompt.addEventListener('input', upd); upd();
+    const wmin = el('input', { type: 'number', id: 'wmin', min: 50, max: 3000, step: 10, value: s.minWords });
+    const wmax = el('input', { type: 'number', id: 'wmax', min: 50, max: 3000, step: 10, value: s.maxWords });
+    const promptCard = el('div', { class: 'card' }, el('h2', {}, 'Prompt de rédaction'),
+      el('p', { class: 'muted' }, 'C\'est LE texte envoyé à l\'IA pour chaque article : ton, faits autorisés, mots interdits, structure, longueur, liens, et format de réponse (JSON). Rien d\'autre n\'est ajouté par l\'outil, sauf le sujet et la ville.'),
+      el('label', { for: 'prompt' }, 'Votre prompt'), prompt, count, warn,
+      hint('Le format JSON (title, metaTitle, metaDescription, slug, htmlContent, internalLinkSuggestions, faitsAVerifier) doit rester dans le prompt, sinon l\'outil ne peut pas lire la réponse. Un changement s\'applique aux prochains articles.'),
+      el('div', { class: 'row btn-row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveSettings({ systemPrompt: prompt.value }); setMsg('prompt', 'ok', 'Prompt enregistré. Il sera utilisé pour les prochains articles.'); render(); }) }, 'Enregistrer le prompt'),
+        el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => {
+          if (!confirm('Remplacer votre prompt par le texte d\'origine ? Vos modifications seront perdues.')) return;
+          await saveSettings({ systemPrompt: D.systemPrompt }); setMsg('prompt', 'ok', 'Texte d\'origine rétabli.'); render();
+        }) }, 'Rétablir le texte d\'origine')),
+      msgBox('prompt'),
+      el('h3', { class: 'mt' }, 'Contrôle de la longueur'),
+      el('p', { class: 'muted small' }, 'Le prompt demande la longueur à l\'IA ; ces deux nombres servent à CONTRÔLER le résultat : hors de la plage, l\'article est signalé et ne part pas sans votre confirmation. Il n\'y a pas de nouvel essai automatique : si l\'IA écrit trop court, régénérez l\'article ou changez de modèle.'),
+      el('div', { class: 'row' }, el('div', { class: 'grow-field' }, el('label', { for: 'wmin' }, 'Minimum (mots)'), wmin), el('div', { class: 'grow-field' }, el('label', { for: 'wmax' }, 'Maximum (mots)'), wmax)),
+      el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await saveSettings({ minWords: Number(wmin.value), maxWords: Number(wmax.value) }, 'Longueur enregistrée.'); render(); }) }, 'Enregistrer la longueur')),
+      el('p', { class: 'muted small' }, 'Sur l\'hébergement gratuit, les réglages peuvent être réinitialisés lors d\'un redémarrage du serveur : gardez une copie de votre prompt.'));
+
+    // Modèle
+    const model = el('input', { type: 'text', id: 'model', maxlength: 99, value: s.aiModel || '', placeholder: D.envModel ? 'Par défaut : ' + D.envModel : 'Exemple : anthropic/claude-haiku-5-5', autocomplete: 'off', spellcheck: 'false' });
+    const activate = async (value) => {
+      setMsg('model', 'ko', 'Test en cours (quelques secondes)...'); render();
+      try { const r = await api('/ai/model', 'POST', { model: value }); setMsg('model', r.ok ? 'ok' : 'ko', r.message); } catch (e) { setMsg('model', 'ko', e.message); }
+      S.settings = await api('/settings'); S.aiDefaults = await api('/ai/defaults'); S.status = await api('/status'); render();
+    };
+    const modelCard = el('div', { class: 'card' }, el('h2', {}, 'Modèle d\'intelligence artificielle'),
+      el('p', { class: 'muted' }, 'C\'est ce modèle qui rédige vos articles. Un nouveau modèle est testé avant d\'être utilisé : s\'il ne répond pas, l\'actuel est conservé.'),
+      el('div', { class: 'model-now' }, 'Rédigé avec : ', el('b', {}, D.activeModel || 'aucun modèle choisi'), D.activeModel && !s.aiModel ? el('span', { class: 'muted small' }, ' (modèle du serveur)') : null),
+      el('label', { for: 'model' }, 'Identifiant du modèle'), model,
+      hint('Copiez l\'identifiant exact depuis openrouter.ai/models. Vide = modèle du serveur.'),
+      el('div', { class: 'row btn-row' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(() => activate(model.value)) }, 'Tester et activer le modèle'),
+        D.previousModel ? el('button', { class: 'btn', type: 'button', onclick: safe(() => activate(D.previousModel)) }, `Revenir au modèle précédent (${D.previousModel})`) : null),
+      msgBox('model'));
+
+    // Sujets
+    const kw = el('input', { type: 'text', maxlength: 100, placeholder: 'Sujet, par exemple : alarme sans fil pour appartement', 'aria-label': 'Sujet', required: true });
+    const city = el('input', { type: 'text', maxlength: 60, placeholder: 'Ville (facultatif)', 'aria-label': 'Ville' });
+    const topics = el('div', { class: 'chips' });
+    if (!s.topics.length) topics.append(el('p', { class: 'muted' }, 'Aucun sujet pour l\'instant.'));
+    s.topics.forEach((tp) => topics.append(el('div', { class: 'chip' }, el('div', { class: 'grow' }, el('b', {}, tp.keyword), tp.city ? ' à ' + tp.city : ''),
+      el('button', { type: 'button', 'aria-label': 'Supprimer ce sujet', onclick: safe(async () => { S.settings = await api('/topics/' + tp.id, 'DELETE'); render(); }) }, icon('trash')))));
+    const topicsCard = el('div', { class: 'card' }, el('h2', {}, 'Sujets d\'articles'), el('p', { class: 'muted' }, 'Une liste de mots-clés (avec une ville si utile). Le mode « Plusieurs articles » les prend dans l\'ordre. Vous pouvez aussi taper un sujet à la volée dans « Rédiger ».'),
+      el('form', { class: 'row', onsubmit: safe(async (e) => { e.preventDefault(); S.settings = await api('/topics', 'POST', { keyword: kw.value, city: city.value }); render(); }) }, kw, city, el('button', { class: 'btn primary', type: 'submit' }, icon('plus'), 'Ajouter')),
+      hint('Pour un planning de 6 mois à 3 articles par mois, il faut 18 sujets différents. Évitez deux articles sur le même mot-clé.'), topics);
+
+    // Entreprise
+    const brand = el('input', { type: 'text', maxlength: 60, value: s.brandName, id: 'brand' });
+    const zone = el('input', { type: 'text', maxlength: 80, value: s.zone, id: 'zone' });
+    const companyCard = el('div', { class: 'card' }, el('h2', {}, 'Votre entreprise'), el('p', { class: 'muted' }, 'Le nom et la zone sont transmis à l\'IA avec chaque sujet (en plus du prompt).'),
+      el('label', { for: 'brand' }, 'Nom commercial'), brand, el('label', { for: 'zone' }, 'Zone desservie'), zone,
+      el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveSettings({ brandName: brand.value, zone: zone.value }, 'Informations enregistrées.'); }) }, 'Enregistrer')));
+
+    return [promptCard, modelCard, topicsCard, companyCard];
+  }
+
+  // Extrait de code à installer une fois dans WordPress pour que Yoast reçoive mot-clé, titre SEO et description.
+  const YOAST_SNIPPET = `add_action('init', function () {
+    foreach (['_yoast_wpseo_focuskw', '_yoast_wpseo_title', '_yoast_wpseo_metadesc'] as $key) {
+        register_post_meta('post', $key, [
+            'show_in_rest'  => true,
+            'single'        => true,
+            'type'          => 'string',
+            'auth_callback' => function () { return current_user_can('edit_posts'); },
+        ]);
+    }
+});`;
+
+  // ----- Connexions : mise en route, WordPress, Yoast, clé de rédaction, PageSpeed -----
   function settingsConnexions() {
     const s = S.settings, st = S.status;
     const jump = (tab) => () => { S.settingsTab = tab; render(); };
@@ -746,12 +900,12 @@
     const setup = el('div', { class: 'card' }, el('h2', {}, 'Mise en route'), el('p', { class: 'muted' }, 'Quatre points pour passer du mode démonstration à l\'utilisation réelle.'),
       row(wpOk, 'Liaison avec WordPress', wpOk ? 'Identifiant et mot de passe renseignés.' : 'Identifiant et mot de passe d\'application à saisir plus bas.'),
       row(keyOk, 'Clé de rédaction (OpenRouter)', keyOk ? 'Clé renseignée.' : 'À saisir plus bas, dans « Clé de rédaction ».'),
-      row(modelOk, 'Modèle d\'intelligence artificielle', modelOk ? 'Un modèle est choisi.' : 'À choisir et tester dans l\'onglet Rédaction.', modelOk ? null : el('button', { class: 'btn', type: 'button', onclick: jump('ia') }, 'Ouvrir Rédaction')),
+      row(modelOk, 'Modèle d\'intelligence artificielle', modelOk ? 'Un modèle est choisi.' : 'À choisir et tester dans l\'onglet Rédaction.', modelOk ? null : el('button', { class: 'btn', type: 'button', onclick: jump('redaction') }, 'Ouvrir Rédaction')),
       row(!st.simulate, 'Mode réel activé', st.simulate ? 'Le mode démonstration est encore actif : aucun appel réel.' : 'Les vrais services sont utilisés. Rien n\'est publié sans votre validation.'));
 
     const demo = el('input', { type: 'checkbox', checked: st.simulate ? true : false, id: 'demo', role: 'switch' });
     demo.addEventListener('change', safe(async () => {
-      if (!demo.checked && !confirm('Passer en mode réel ? Les articles seront rédigés avec votre clé OpenRouter et envoyés en brouillon sur votre site. Rien n\'est publié sans votre validation.')) { demo.checked = true; return; }
+      if (!demo.checked && !confirm('Passer en mode réel ? Les articles seront rédigés avec votre clé OpenRouter et envoyés sur votre site à votre demande. Rien n\'est publié sans votre validation.')) { demo.checked = true; return; }
       await saveSettings({ simulate: demo.checked }, demo.checked ? 'Mode démonstration activé.' : 'Mode réel activé.'); render();
     }));
     const demoCard = el('div', { class: 'card' }, el('h2', {}, 'Mode démonstration'),
@@ -777,34 +931,47 @@
       render();
     });
     const wpCard = el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Liaison avec WordPress'), secretState(wpSec)),
-      el('p', { class: 'muted' }, 'Permet d\'envoyer les articles en brouillon sur votre site.'),
+      el('p', { class: 'muted' }, 'Permet d\'envoyer, programmer et publier les articles sur votre site.'),
       el('details', { class: 'faq' }, el('summary', {}, 'Où trouver le mot de passe d\'application ?'), el('div', { class: 'a' },
-        el('p', {}, 'À faire une fois, par un administrateur du site :'),
         el('ol', { class: 'tasks' }, [
           'Connectez-vous à WordPress, puis ouvrez Utilisateurs, Profil (idéalement un compte dédié avec le rôle Éditeur).',
           'Descendez jusqu\'à « Mots de passe d\'application », saisissez le nom « Tableau de bord CityLock », puis cliquez sur « Ajouter ».',
           'Copiez le mot de passe affiché (il ne s\'affiche qu\'une fois) et collez-le ci-dessous.'].map((x) => el('li', {}, x))),
-        el('p', { class: 'muted small' }, 'Ce n\'est pas le mot de passe de connexion à WordPress. Si la section est absente, le site doit être en HTTPS et une extension de sécurité peut l\'avoir désactivée.'))),
+        el('p', { class: 'muted small' }, 'Ce n\'est pas le mot de passe de connexion à WordPress.'))),
       el('label', { for: 'wp-site' }, 'Adresse du site'), site, hint('Fixée sur le serveur pour protéger vos identifiants. Elle ne se change pas ici.'),
-      el('label', { for: 'wp-user' }, 'Identifiant WordPress'), user, hint('Le nom d\'utilisateur du compte qui envoie les articles sur le site.'),
+      el('label', { for: 'wp-user' }, 'Identifiant WordPress'), user,
       el('label', { for: 'wp-pass' }, 'Mot de passe d\'application'), pass, hint('Un mot de passe créé exprès pour cet outil. Il n\'est jamais réaffiché une fois enregistré.'),
-      st.simulate ? el('div', { class: 'alert mt' }, 'Le mode démonstration est actif : le test ne contacte pas votre site.') : null,
       el('div', { class: 'row btn-row' },
         el('button', { class: 'btn primary', type: 'button', onclick: saveTestWp }, 'Enregistrer et tester'),
         el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await api('/category/ensure', 'POST'); toast('Catégorie « Blog » prête sur votre site.'); }) }, 'Préparer la catégorie « Blog »'),
-        wpSec.source === 'interface' ? el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => {
-          if (!confirm('Effacer le mot de passe enregistré ?')) return;
-          await saveSecrets({ wpAppPassword: '' }, 'Mot de passe effacé.'); render();
-        }) }, 'Effacer le mot de passe') : null),
+        wpSec.source === 'interface' ? el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => { if (!confirm('Effacer le mot de passe enregistré ?')) return; await saveSecrets({ wpAppPassword: '' }, 'Mot de passe effacé.'); render(); }) }, 'Effacer le mot de passe') : null),
       msgBox('wp'));
 
-    // Clé de rédaction (OpenRouter)
+    // Yoast
+    const Y = S.yoast;
+    const yTone = !Y ? '' : Y.simulated ? 'warn' : Y.ok ? 'ok' : 'ko';
+    const yText = !Y ? 'Pas encore vérifié.' : Y.simulated ? 'Mode démonstration : non vérifiable.' : Y.ok ? 'Le site accepte le mot-clé principal, le titre SEO et la description : ils sont envoyés avec chaque article.' : Y.known ? 'Le site n\'accepte pas encore ces champs : les articles partent sans mot-clé principal ni description Yoast (Yoast affiche alors des voyants rouges).' : 'Impossible de lire l\'état du site.';
+    const yoastCard = el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Yoast SEO'), Y ? el('span', { class: 'pill ' + yTone }, Y.simulated ? 'Démonstration' : Y.ok ? 'Actif' : 'À installer') : null),
+      el('p', { class: 'muted' }, 'Pour que Yoast reçoive le mot-clé principal, le titre SEO et la description de chaque article, WordPress doit autoriser ces trois champs. C\'est un petit extrait de code, à installer une seule fois.'),
+      el('p', { class: yTone === 'ok' ? 'ok-text' : '' }, yText),
+      el('details', { class: 'faq' }, el('summary', {}, 'Installer l\'extrait de code (une fois)'), el('div', { class: 'a' },
+        el('ol', { class: 'tasks' }, [
+          'Dans WordPress, installez l\'extension gratuite « WPCode » (ou « Code Snippets »).',
+          'Créez un nouvel extrait de type PHP, collez le code ci-dessous, activez-le et enregistrez.',
+          'Revenez ici et cliquez sur « Vérifier ». Puis, pour un article déjà envoyé, ouvrez « Modifier » et enregistrez à nouveau.'].map((x) => el('li', {}, x))),
+        el('pre', { class: 'pre' }, YOAST_SNIPPET),
+        el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await navigator.clipboard.writeText(YOAST_SNIPPET); toast('Code copié.'); }) }, 'Copier le code')),
+        el('p', { class: 'muted small' }, 'Il ne modifie aucun contenu : il autorise seulement l\'outil à écrire ces trois champs Yoast. Il faut un compte capable de modifier des articles.'))),
+      el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { S.yoast = await api('/wp/yoast'); render(); }) }, 'Vérifier')),
+      el('p', { class: 'muted small' }, 'Honnêtement : cela corrige les voyants « pas de mot-clé » et « pas de méta description ». Les autres voyants de Yoast (longueur, mot-clé dans l\'introduction, liens sortants, etc.) dépendent du texte lui-même.'));
+    if (!S.yoastLoaded) { S.yoastLoaded = true; api('/wp/yoast').then((y) => { S.yoast = y; if (S.view === 'settings' && S.settingsTab === 'connexions') render(); }).catch(() => {}); }
+
+    // Clé OpenRouter
     const keySec = s.secrets.openrouterKey;
     const key = secretInput('or-key', keySec, 'Collez la clé OpenRouter');
     const keyCard = el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Clé de rédaction (OpenRouter)'), secretState(keySec)),
       el('p', { class: 'muted' }, 'OpenRouter est le service qui fait écrire les articles par l\'intelligence artificielle.'),
-      el('label', { for: 'or-key' }, 'Clé OpenRouter'), key,
-      hint('Créez-la sur openrouter.ai (menu Keys). Elle est chiffrée et ne s\'affiche plus jamais.'),
+      el('label', { for: 'or-key' }, 'Clé OpenRouter'), key, hint('Créez-la sur openrouter.ai (menu Keys). Elle est chiffrée et ne s\'affiche plus jamais.'),
       keySec.hint ? el('p', { class: 'muted small' }, `Clé actuelle terminée par « ${keySec.hint} ».`) : null,
       el('div', { class: 'row btn-row' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { if (!key.value) { toast('Collez d\'abord la clé.', true); return; } await saveSecrets({ openrouterKey: key.value }, 'Clé OpenRouter enregistrée.'); render(); }) }, 'Enregistrer la clé'),
         keySec.source === 'interface' ? el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => { if (!confirm('Effacer la clé enregistrée ?')) return; await saveSecrets({ openrouterKey: '' }, 'Clé effacée.'); render(); }) }, 'Effacer la clé') : null));
@@ -814,212 +981,39 @@
     const ps = secretInput('ps-key', psSec, 'Collez la clé Google PageSpeed');
     const psCard = el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Vitesse du site (facultatif)'), secretState(psSec)),
       el('p', { class: 'muted' }, 'Avec une clé Google PageSpeed Insights, le score mesure aussi la vitesse sur mobile. Sans clé, ce critère est simplement « non mesuré ».'),
-      el('label', { for: 'ps-key' }, 'Clé PageSpeed'), ps, hint('Facultative. Elle est chiffrée et ne s\'affiche plus jamais.'),
-      el('div', { class: 'row btn-row' },
-        el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { if (!ps.value) { toast('Collez d\'abord la clé.', true); return; } await saveSecrets({ pagespeedKey: ps.value }, 'Clé PageSpeed enregistrée.'); render(); }) }, 'Enregistrer'),
+      el('label', { for: 'ps-key' }, 'Clé PageSpeed'), ps,
+      el('div', { class: 'row btn-row' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { if (!ps.value) { toast('Collez d\'abord la clé.', true); return; } await saveSecrets({ pagespeedKey: ps.value }, 'Clé PageSpeed enregistrée.'); render(); }) }, 'Enregistrer'),
         psSec.source === 'interface' ? el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => { await saveSecrets({ pagespeedKey: '' }, 'Clé effacée.'); render(); }) }, 'Effacer la clé') : null));
 
-    return [setup, demoCard, wpCard, keyCard, psCard,
+    return [setup, demoCard, wpCard, yoastCard, keyCard, psCard,
       el('p', { class: 'muted small' }, 'Les clés saisies ici sont chiffrées sur le serveur et ne s\'affichent plus jamais. Sur l\'hébergement gratuit sans disque, elles sont effacées à un redémarrage : gardez aussi une copie dans les variables de l\'hébergeur.')];
   }
-
-  // ----- Rédaction : modèle, instructions, sujets, entreprise -----
-  function settingsIa() {
-    const s = S.settings;
-    const D = S.aiDefaults;
-    const model = el('input', { type: 'text', id: 'model', maxlength: 99, value: s.aiModel || '', placeholder: D.envModel ? 'Par défaut : ' + D.envModel : 'Exemple : anthropic/claude-haiku-5-5', autocomplete: 'off', spellcheck: 'false' });
-    const activate = async (value) => {
-      setMsg('model', 'ko', 'Test en cours (quelques secondes)...'); render();
-      try {
-        const r = await api('/ai/model', 'POST', { model: value });
-        setMsg('model', r.ok ? 'ok' : 'ko', r.message);
-      } catch (e) { setMsg('model', 'ko', e.message); }
-      S.settings = await api('/settings'); S.aiDefaults = await api('/ai/defaults'); S.status = await api('/status'); render();
-    };
-    const modelCard = el('div', { class: 'card' }, el('h2', {}, 'Modèle d\'intelligence artificielle'),
-      el('p', { class: 'muted' }, 'C\'est ce modèle qui rédige vos articles. Un nouveau modèle est testé avant d\'être utilisé : s\'il ne répond pas, l\'actuel est conservé.'),
-      el('div', { class: 'model-now' }, 'Rédigé avec : ', el('b', {}, D.activeModel || 'aucun modèle choisi'), D.activeModel && !s.aiModel ? el('span', { class: 'muted small' }, ' (modèle du serveur)') : null),
-      el('label', { for: 'model' }, 'Identifiant du modèle'), model,
-      hint('Copiez l\'identifiant exact depuis openrouter.ai/models, par exemple anthropic/claude-haiku-5-5. Vide = modèle du serveur.'),
-      el('div', { class: 'row btn-row' },
-        el('button', { class: 'btn primary', type: 'button', onclick: safe(() => activate(model.value)) }, 'Tester et activer le modèle'),
-        D.previousModel ? el('button', { class: 'btn', type: 'button', onclick: safe(() => activate(D.previousModel)) }, `Revenir au modèle précédent (${D.previousModel})`) : null),
-      msgBox('model'));
-
-    const rules = el('textarea', { id: 'rules', rows: 18, maxlength: D.maxLength, class: 'mono', 'aria-label': 'Instructions pour la rédaction' });
-    rules.value = s.systemPrompt || D.systemPrompt;
-    const rulesCount = el('div', { class: 'count muted' });
-    const updCount = () => { rulesCount.textContent = `${rules.value.length} caractères sur ${D.maxLength}` + (rules.value.trim() === D.systemPrompt.trim() ? ' · texte d\'origine' : ' · texte personnalisé'); };
-    rules.addEventListener('input', updCount); updCount();
-    const rulesCard = el('div', { class: 'card' }, el('h2', {}, 'Instructions pour la rédaction'),
-      el('p', { class: 'muted' }, 'Ce texte explique à l\'IA comment écrire : ton, faits autorisés, mots interdits, structure. Ajustez-le selon les retours de Laurent.'),
-      el('label', { for: 'rules' }, 'Instructions'), rules, rulesCount,
-      hint('Les instructions sont envoyées à l\'IA pour chaque article. Un changement s\'applique aux prochains articles.'),
-      el('div', { class: 'alert mt' }, 'La longueur (600 à 900 mots) et le format de réponse sont imposés par l\'outil, quoi que vous écriviez ici. Gardez les règles sur les chiffres inventés et les promesses : elles évitent de fausses informations sur votre site.'),
-      el('div', { class: 'row btn-row' },
-        el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => {
-          await saveSettings({ systemPrompt: rules.value.trim() === D.systemPrompt.trim() ? '' : rules.value }); setMsg('rules', 'ok', 'Instructions enregistrées. Elles seront utilisées pour les prochains articles.'); render();
-        }) }, 'Enregistrer les instructions'),
-        el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => {
-          if (!confirm('Revenir au texte d\'origine des instructions ? Vos modifications seront perdues.')) return;
-          await saveSettings({ systemPrompt: '' }); setMsg('rules', 'ok', 'Instructions d\'origine rétablies.'); render();
-        }) }, 'Rétablir le texte d\'origine')),
-      msgBox('rules'),
-      el('p', { class: 'muted small' }, 'Sur l\'hébergement gratuit, ces réglages peuvent être réinitialisés lors d\'un redémarrage du serveur : gardez une copie de vos instructions.'));
-
-    // Sujets
-    const kw = el('input', { type: 'text', maxlength: 100, placeholder: 'Sujet, par exemple : alarme sans fil pour appartement', 'aria-label': 'Sujet', required: true });
-    const city = el('input', { type: 'text', maxlength: 60, placeholder: 'Ville (facultatif)', 'aria-label': 'Ville' });
-    const topics = el('div', { class: 'chips' });
-    if (!s.topics.length) topics.append(el('p', { class: 'muted' }, 'Aucun sujet pour l\'instant.'));
-    s.topics.forEach((tp) => topics.append(el('div', { class: 'chip' }, el('div', { class: 'grow' }, el('b', {}, tp.keyword), tp.city ? ' à ' + tp.city : ''),
-      el('button', { type: 'button', 'aria-label': 'Supprimer ce sujet', onclick: safe(async () => { S.settings = await api('/topics/' + tp.id, 'DELETE'); await refreshPlan(); render(); }) }, icon('trash')))));
-    const topicsCard = el('div', { class: 'card' }, el('h2', {}, 'Sujets d\'articles'), el('p', { class: 'muted' }, 'Un sujet = un mot-clé que vous voulez travailler, avec une ville si utile. Chaque article est rédigé pour un sujet.'),
-      el('form', { class: 'row', onsubmit: safe(async (e) => { e.preventDefault(); S.settings = await api('/topics', 'POST', { keyword: kw.value, city: city.value }); await refreshPlan(); render(); }) }, kw, city, el('button', { class: 'btn primary', type: 'submit' }, icon('plus'), 'Ajouter')),
-      hint('Ne visez pas « alarme sans abonnement » ou « alarme autonome » comme sujet principal : cherchez des questions précises de lecteurs.'), topics);
-
-    // Entreprise
-    const brand = el('input', { type: 'text', maxlength: 60, value: s.brandName, id: 'brand' });
-    const zone = el('input', { type: 'text', maxlength: 80, value: s.zone, id: 'zone' });
-    const companyCard = el('div', { class: 'card' }, el('h2', {}, 'Votre entreprise'), el('p', { class: 'muted' }, 'Ces informations sont transmises à l\'IA avec chaque sujet.'),
-      el('label', { for: 'brand' }, 'Nom commercial'), brand, hint('Le nom tel qu\'il doit apparaître dans les articles.'),
-      el('label', { for: 'zone' }, 'Zone desservie'), zone, hint('Les villes ou le département où vous intervenez.'),
-      el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveSettings({ brandName: brand.value, zone: zone.value }, 'Informations enregistrées.'); }) }, 'Enregistrer')));
-
-    return [modelCard, rulesCard, topicsCard, companyCard];
-  }
-
-  // ----- Publication : rythme, mode, publication automatique, essais, journal -----
-  function settingsPublication() {
-    const s = S.settings;
-    const freq = el('input', { type: 'range', min: 1, max: 8, step: 1, value: s.frequency, 'aria-label': 'Articles par mois' });
-    const big = el('div', { class: 'freq-val' }, s.frequency, el('small', {}, plural(s.frequency, 'article par mois', 'articles par mois')));
-    const fhint = el('p', { class: 'muted small hint' }, freqHint(s.frequency));
-    freq.addEventListener('input', () => { big.replaceChildren(freq.value, el('small', {}, plural(+freq.value, 'article par mois', 'articles par mois'))); fhint.textContent = freqHint(+freq.value); });
-    freq.addEventListener('change', safe(async () => { await saveSettings({ frequency: Number(freq.value) }, 'Rythme enregistré.'); }));
-    const freqCard = el('div', { class: 'card' }, el('h2', {}, 'Combien d\'articles par mois ?'), el('p', { class: 'muted' }, 'Déplacez le curseur. L\'outil ne rédigera jamais plus que ce nombre.'), big, freq, el('div', { class: 'scale' }, el('span', {}, '1'), el('span', {}, '8')), fhint);
-
-    // Mode de publication : 3 choix. « Automatique » ne s'active que par un interrupteur explicite, après avertissement.
-    const WARNING = 'Les articles seront publiés sans relecture. Laurent doit avoir donné son accord écrit.';
-    const mode = s.publishMode;
-    const choice = (value, title, desc) => {
-      const inp = el('input', { type: 'radio', name: 'pubmode', value });
-      inp.checked = S.pubPending ? value === 'automatique' : mode === value;
-      inp.addEventListener('change', safe(async () => {
-        if (value === 'automatique') { S.pubPending = true; render(); return; }
-        S.pubPending = false;
-        await saveSettings({ publishMode: value }, value === 'essai' ? 'Mode « essai » activé.' : 'Mode « brouillon seulement » activé.'); render();
-      }));
-      return el('label', { class: 'choice' + (inp.checked ? ' on' : '') }, inp, el('span', {}, el('b', {}, title), el('span', { class: 'muted small' }, desc)));
-    };
-    const modeCard = el('div', { class: 'card' }, el('h2', {}, 'Mode de publication'), el('p', { class: 'muted' }, 'Choisissez ce qui arrive à un article une fois rédigé.'),
-      el('div', { class: 'choices' },
-        choice('brouillon', 'Brouillon seulement (recommandé)', 'L\'article est envoyé sur le site en brouillon. Personne ne le publie sans votre clic.'),
-        choice('essai', 'Essai', 'Comme « brouillon seulement », mais l\'article est marqué « essai » (préfixe [ESSAI] sur le site) pour ne pas être pris pour un vrai article.'),
-        choice('automatique', 'Automatique', 'Publie seul les articles qui remplissent toutes les conditions. Désactivé par défaut.')));
-
-    const auto = el('input', { type: 'checkbox', id: 'auto-on', role: 'switch' });
-    auto.checked = mode === 'automatique';
-    auto.addEventListener('change', safe(async () => {
-      if (auto.checked) {
-        if (!confirm(WARNING + '\n\nActiver la publication automatique ?')) { auto.checked = false; return; }
-        await saveSettings({ publishMode: 'automatique', confirmAutomatic: true }, 'Publication automatique activée.');
-      } else {
-        await saveSettings({ publishMode: 'brouillon' }, 'Publication automatique désactivée.');
-      }
-      S.pubPending = false; render();
-    }));
-    const showAuto = S.pubPending || mode === 'automatique';
-    const autoCards = [];
-    if (showAuto) {
-      autoCards.push(el('div', { class: 'card warn-card' }, el('h2', {}, 'Publication automatique'),
-        el('div', { class: 'alert' }, WARNING),
-        el('div', { class: 'switch-row mt' }, el('div', {}, el('b', {}, 'J\'ai lu l\'avertissement : activer la publication automatique'), el('p', { class: 'muted small' }, 'Désactivée tant que vous ne basculez pas cet interrupteur.')),
-          el('label', { class: 'switch', for: 'auto-on', 'aria-label': 'Activer la publication automatique' }, auto, el('span')))));
-    }
-    if (mode === 'automatique') {
-      const delay = el('input', { type: 'number', id: 'auto-delay', min: 1, max: 30, step: 1, value: s.autoPublishDelayDays });
-      const maxw = el('input', { type: 'number', id: 'auto-max', min: 1, max: 14, step: 1, value: s.autoPublishMaxPerWeek });
-      const queue = S.articles.filter((a) => a.auto && a.auto.active && !a.auto.cancelled);
-      autoCards.push(el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Règles de la publication automatique'), s.publishPaused ? el('span', { class: 'pill ko' }, 'Suspendue') : el('span', { class: 'pill ok' }, 'Active')),
-        el('p', { class: 'muted' }, 'Un article n\'est publié seul que si toutes ces conditions sont remplies :'),
-        el('ul', { class: 'tasks' }, [
-          'aucun fait à vérifier dans la liste ;', 'un texte de 600 à 900 mots ;', 'aucun mot interdit ;', 'aucun marqueur [SOURCE A VERIFIER] ;',
-          `la date de publication prévue est atteinte (${s.autoPublishDelayDays} ${plural(s.autoPublishDelayDays, 'jour', 'jours')} après l'envoi sur le site) ;`,
-          `pas plus de ${s.autoPublishMaxPerWeek} ${plural(s.autoPublishMaxPerWeek, 'article publié', 'articles publiés')} par semaine.`].map((x) => el('li', {}, x))),
-        hint('Le texte présent sur le site est relu juste avant de publier. Seuls les articles créés après l\'activation sont concernés.'),
-        el('div', { class: 'row mt' }, el('div', { class: 'grow-field' }, el('label', { for: 'auto-delay' }, 'Délai d\'attente (jours)'), delay, hint('Pendant ce délai, vous pouvez annuler la publication d\'un article.')),
-          el('div', { class: 'grow-field' }, el('label', { for: 'auto-max' }, 'Articles publiés par semaine (maximum)'), maxw, hint('Au-delà, les suivants attendent la semaine d\'après.'))),
-        el('div', { class: 'row btn-row' },
-          el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveSettings({ autoPublishDelayDays: Number(delay.value), autoPublishMaxPerWeek: Number(maxw.value) }, 'Règles enregistrées.'); render(); }) }, 'Enregistrer les règles'),
-          s.publishPaused
-            ? el('button', { class: 'btn', type: 'button', onclick: safe(async () => { S.settings = await api('/publish/pause', 'POST', { paused: false }); toast('Publications reprises.'); render(); }) }, 'Reprendre les publications')
-            : el('button', { class: 'btn danger big', type: 'button', onclick: safe(async () => { S.settings = await api('/publish/pause', 'POST', { paused: true }); toast('Toutes les publications automatiques sont suspendues.'); render(); }) }, 'Tout arrêter'),
-          el('button', { class: 'btn', type: 'button', onclick: safe(async () => {
-            const r = await api('/publish/auto/run', 'POST');
-            await refresh();
-            toast(r.published.length ? `${r.published.length} ${plural(r.published.length, 'article publié', 'articles publiés')}.` : 'Rien à publier pour le moment' + (r.skipped.length ? ` (${r.skipped.length} ${plural(r.skipped.length, 'article attend', 'articles attendent')}).` : '.'));
-            render();
-          }) }, 'Vérifier maintenant')),
-        hint('« Tout arrêter » suspend immédiatement les publications automatiques. Vous pouvez toujours publier vous-même un article.'),
-        el('h3', { class: 'mt' }, 'Articles programmés'),
-        queue.length ? el('ul', { class: 'versions' }, queue.map((a) => el('li', {}, el('div', { class: 'grow' }, el('b', {}, a.title), el('div', { class: 'muted small' }, a.auto.scheduledAt ? `Possible à partir du ${fmtDateTime(a.auto.scheduledAt)}` : 'Date fixée à l\'envoi sur le site') , a.auto.blockers.length ? el('div', { class: 'warn small' }, 'Bloqué : ' + a.auto.blockers.join(' ; ')) : null),
-          el('button', { class: 'btn', type: 'button', onclick: () => go('article', a.id) }, 'Ouvrir'),
-          el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => { await api(`/articles/${a.id}/cancel-auto`, 'POST', {}); await refresh(); render(); toast('Publication automatique annulée.'); }) }, 'Annuler'))))
-          : el('p', { class: 'muted small' }, 'Aucun article programmé pour le moment.')));
-    }
-
-    // Envoi en brouillon
-    const draft = el('input', { type: 'checkbox', checked: s.autoDraft ? true : false, id: 'auto', role: 'switch' });
-    draft.addEventListener('change', safe(async () => { await saveSettings({ autoDraft: draft.checked }, draft.checked ? 'Envoi automatique en brouillon activé.' : 'Envoi automatique en brouillon désactivé.'); render(); }));
-    const draftCard = el('div', { class: 'card' }, el('h2', {}, 'Envoi sur le site'),
-      el('div', { class: 'switch-row' }, el('div', {}, el('b', {}, 'Envoyer chaque article en brouillon, automatiquement'), el('p', { class: 'muted small' }, mode === 'automatique' ? 'Toujours actif en mode automatique : on ne publie que des articles déjà présents sur le site en brouillon.' : 'Le brouillon n\'est pas visible du public. Un article dont la longueur est hors de 600 à 900 mots n\'est jamais envoyé automatiquement.')),
-        el('label', { class: 'switch', for: 'auto', 'aria-label': 'Envoi automatique en brouillon' }, draft, el('span'))));
-
-    // Essais en cours
-    const essais = S.articles.filter((a) => a.essai && a.status !== 'publie');
-    const essaiCard = (mode === 'essai' || essais.length) ? el('div', { class: 'card' }, el('h2', {}, 'Essais en cours'),
-      el('p', { class: 'muted' }, 'Les articles marqués « essai », pas encore publiés.'),
-      essais.length ? el('ul', { class: 'versions' }, essais.map((a) => el('li', {}, el('div', { class: 'grow' }, el('b', {}, a.title), el('div', { class: 'muted small' }, `${a.state.label} · ${fmtDate(a.createdAt)}`)), el('button', { class: 'btn', type: 'button', onclick: () => go('article', a.id) }, 'Ouvrir')))) : el('p', { class: 'muted small' }, 'Aucun essai en cours.')) : null;
-
-    // Journal des publications
-    const pubs = S.publications || [];
-    const journal = el('div', { class: 'card' }, el('h2', {}, 'Journal des publications'), el('p', { class: 'muted' }, 'Chaque publication est notée : date, heure, titre et adresse.'),
-      pubs.length ? el('div', { class: 'tablewrap' }, el('table', { class: 't' }, el('tr', {}, ['Date et heure', 'Titre', 'Adresse', 'Mode'].map((h) => el('th', {}, h))),
-        pubs.map((p) => el('tr', {}, el('td', {}, fmtDateTime(p.at)), el('td', {}, p.title), el('td', {}, p.url && !p.simulated ? el('a', { href: p.url, target: '_blank', rel: 'noopener noreferrer' }, p.url) : (p.simulated ? 'démonstration' : '')), el('td', {}, p.by === 'automatique' ? 'Automatique' : 'Manuelle')))))
-        : el('p', { class: 'muted small' }, 'Aucune publication pour l\'instant.'),
-      el('p', { class: 'muted small' }, 'Sur l\'hébergement gratuit sans disque, ce journal est effacé à un redémarrage du serveur.'));
-
-    return [freqCard, modeCard, ...autoCards, draftCard, essaiCard, journal];
-  }
-
-  const freqHint = (n) => `Soit environ un article toutes les ${Math.max(1, Math.round(4.3 / n * 10) / 10).toString().replace('.', ',')} semaines.`;
 
   // ---------- Aide ----------
   function viewHelp() {
     const faq = (q, ...paras) => el('details', { class: 'faq' }, el('summary', {}, q), el('div', { class: 'a' }, paras.map((p) => el('p', {}, p))));
     return [
       head('Aide', 'Tout ce qu\'il faut savoir, simplement.'),
-      faq('À quoi sert cet outil ?', 'Il prépare des articles de blog pour citylock.fr et mesure chaque semaine la santé de votre site pour Google. Rien n\'est publié sans votre accord.'),
-      faq('Comment choisir le nombre d\'articles ?', 'Dans « Réglages », déplacez le curseur entre 1 et 8 articles par mois. Ajoutez ensuite vos sujets : un article est préparé par sujet.'),
-      faq('Comment relire et publier un article ?', '1. Dans « Articles », cliquez sur « Rédiger les articles du mois ».', '2. Ouvrez un article. Lisez le texte. Les chiffres surlignés en jaune doivent être remplacés par une vraie source, directement dans WordPress.', '3. Quand tout est bon, cochez « J\'ai relu et validé », puis cliquez sur « Publier sur le site ».'),
+      faq('À quoi sert cet outil ?', 'Il rédige des articles de blog pour citylock.fr, vous les laissez relire et corriger, puis WordPress les publie à la date que vous choisissez. Il mesure aussi la santé de votre site pour Google. Rien n\'est publié sans votre accord.'),
+      faq('Les deux façons de rédiger', 'Dans « Rédiger » :', '« Un seul article » : vous choisissez un sujet, l\'article arrive dans « Articles », vous faites ce que vous voulez (le modifier, l\'envoyer en brouillon, le programmer, le supprimer).', '« Plusieurs articles » : vous choisissez le nombre de mois (1 à 6) et d\'articles par mois (1 à 3), l\'outil propose un planning, vous changez les dates ou les sujets si besoin, puis il rédige tout en brouillons. Ensuite, dans « Articles », vous relisez et cliquez sur « Programmer tous les articles prêts ».'),
+      faq('Où est le prompt de rédaction ?', 'Dans « Réglages », onglet « Rédaction ». C\'est le seul texte envoyé à l\'IA (avec le sujet et la ville) : vous pouvez tout y changer, y compris la longueur demandée et le format de réponse. L\'outil n\'ajoute rien en cachette. Si vous supprimez la partie « format de réponse (JSON) », un avertissement apparaît, car l\'outil ne pourrait plus lire l\'article.'),
+      faq('Que veut dire « programmer » ?', 'Vous choisissez une date et une heure : WordPress publie alors l\'article tout seul à ce moment (heure de Paris), même si cet outil est fermé. Vous pouvez annuler la programmation, changer la date, ou publier tout de suite.', 'Pour que WordPress publie à l\'heure exacte, il faut que le site soit visité ou qu\'une tâche planifiée tourne (c\'est le cas de presque tous les sites). Si un article reste « programmé » après sa date, regardez dans WordPress.'),
       faq('Que veut dire « brouillon » ?', 'Un brouillon est un article enregistré sur votre site mais invisible du public. Vous pouvez le modifier tant que vous ne l\'avez pas publié.'),
-      faq('Comment relier mon site WordPress ?', 'Dans « Réglages », onglet « Connexions », suivez la carte « Liaison avec WordPress » : un administrateur crée un mot de passe d\'application dans WordPress, puis vous collez l\'identifiant et ce mot de passe, et vous cliquez sur « Enregistrer et tester ». Un message vert confirme que ça marche.', 'La carte « Mise en route » en haut de l\'onglet vous indique ce qu\'il reste à faire.'),
-      faq('Comment changer le modèle d\'intelligence artificielle ?', 'Dans « Réglages », onglet « Rédaction » : collez l\'identifiant du modèle (à copier depuis openrouter.ai/models) puis cliquez sur « Tester et activer le modèle ».', 'Le modèle n\'est utilisé que si le test réussit. S\'il ne répond pas, l\'ancien reste actif et un message en explique la raison. Chaque article indique « Rédigé avec : » le modèle utilisé.'),
-      faq('Comment modifier les instructions pour la rédaction ?', 'Dans « Réglages », onglet « Rédaction », la carte « Instructions pour la rédaction » contient le texte envoyé à l\'IA avec chaque sujet. Modifiez-le, puis cliquez sur « Enregistrer les instructions ». Le bouton « Rétablir le texte d\'origine » remet le texte de départ.', 'La longueur (600 à 900 mots) est toujours imposée par l\'outil.'),
-      faq('Que faire si un article est trop court ou trop long ?', 'L\'outil vise 600 à 900 mots. Hors de cette plage, une alerte s\'affiche et l\'article n\'est pas envoyé automatiquement sur le site. Cliquez sur « Régénérer » pour en rédiger un nouveau (l\'ancien reste dans l\'historique), ou sur « Modifier » pour le corriger à la main. Pour l\'envoyer ou le publier quand même, une confirmation est demandée.'),
-      faq('Comment modifier un article à la main ?', 'Ouvrez l\'article, puis « Modifier ». Vous pouvez changer le titre, le texte, ce qui s\'affiche dans Google et la liste des faits à vérifier. Le bouton « Insérer un lien » ajoute un lien à l\'endroit du curseur. L\'aperçu et les contrôles se mettent à jour pendant que vous écrivez.', 'Chaque enregistrement garde la version d\'avant : « Revenir à la version précédente » la retrouve. Si l\'article est déjà un brouillon sur le site, il est mis à jour en même temps.'),
-      faq('Quels sont les modes de publication ?', 'Dans « Réglages », onglet « Publication » : « Brouillon seulement » (recommandé) envoie l\'article en brouillon, et personne ne le publie sans votre clic. « Essai » fait pareil mais marque l\'article « essai ». « Automatique » publie seul les articles en règle, après un délai où vous pouvez annuler, avec un maximum par semaine.', 'Le mode automatique est désactivé par défaut. Il demande une confirmation, et « Tout arrêter » le suspend immédiatement.'),
-      faq('À quoi sert « Essayer un article » ?', 'Dans « Articles », ce bouton rédige un article d\'essai pour juger la qualité, sans rien envoyer sur votre site et sans toucher au lot du mois. Vous voyez le texte, les chiffres à vérifier, et exactement ce qui a été envoyé à l\'IA (sujet, ville, consignes). Si le résultat vous plaît, « Garder dans mes articles » le range dans la liste.'),
-      faq('Les sujets sont-ils bien pris en compte ?', 'Oui : dans « Articles », la carte « Ce qui sera rédigé » liste les sujets du prochain lot, dans l\'ordre. Chaque article est rédigé pour un sujet (mot-clé et ville). Un sujet déjà utilisé ce mois-ci n\'est pas repris avant le mois suivant.'),
-      faq('Pourquoi « entreprise locale » est à 0 alors que ma fiche Google est complète ?', 'Ce sont deux choses différentes. La fiche Google Business Profile (horaires, avis, photos, services) est gérée sur Google. Le score, lui, lit le code de la page d\'accueil de votre site, et cherche une déclaration « entreprise locale » (LocalBusiness). Elle peut manquer même si votre fiche Google est parfaite. Le détail du critère indique les types trouvés sur votre accueil.'),
-      faq('Que mesure le score ?', 'Un score sur 100 calculé avec des points précis : titres, descriptions, images décrites, liens cassés, pages trop courtes, plan du site, etc. Il vous dit quoi corriger en priorité.', 'Ce n\'est pas une note Google. Il ne mesure ni votre place dans les résultats, ni le nombre de visiteurs. Un bon score ne garantit aucun classement.'),
+      faq('Pourquoi un article est-il « laissé de côté » ?', 'Parce qu\'il a un problème qui demande votre œil : longueur hors de la plage, mot interdit, marqueur [SOURCE A VERIFIER] à remplacer, ou faits à vérifier. Ouvrez-le, corrigez-le avec « Modifier », puis programmez-le.'),
+      faq('Un article est trop court. Que faire ?', 'Le prompt demande 600 à 900 mots, mais certains modèles écrivent plus court. L\'outil ne réessaie pas tout seul : l\'article est signalé, et il ne part pas sans votre confirmation. Cliquez sur « Régénérer », ou changez de modèle (Réglages, Rédaction).'),
+      faq('Comment modifier un article à la main ?', 'Ouvrez l\'article, puis « Modifier » : titre, texte, description Google, mot-clé principal, faits à vérifier. Le bouton « Insérer un lien » ajoute un lien à l\'endroit du curseur. Chaque enregistrement garde la version d\'avant. Si l\'article est déjà sur le site, il est mis à jour en même temps.'),
+      faq('Les liens « alarme avec / sans abonnement » ne s\'ouvraient pas', 'Les liens du texte sont des adresses de votre site (par exemple /choisir-alarme-sans-abonnement/…). Dans l\'aperçu, ils s\'ouvraient par erreur sur ce tableau de bord : c\'est corrigé, ils s\'ouvrent maintenant sur citylock.fr dans un nouvel onglet. La carte « Liens dans le texte » de chaque article les liste pour les tester.'),
+      faq('Pourquoi Yoast est-il rouge ?', 'Avant, l\'outil n\'envoyait ni le mot-clé principal, ni le titre SEO, ni la description à Yoast. Désormais il le fait, à condition d\'installer une fois un petit extrait de code dans WordPress (Réglages, Connexions, carte « Yoast SEO »). Les autres voyants (longueur du texte, mot-clé dans l\'introduction, liens…) dépendent du contenu.'),
+      faq('Comment relier mon site WordPress ?', 'Dans « Réglages », onglet « Connexions » : un administrateur crée un mot de passe d\'application dans WordPress, vous collez l\'identifiant et ce mot de passe, puis « Enregistrer et tester ».'),
+      faq('Comment changer le modèle d\'IA ?', 'Dans « Réglages », onglet « Rédaction » : collez l\'identifiant du modèle (openrouter.ai/models) puis « Tester et activer le modèle ». Le modèle n\'est utilisé que si le test réussit. Chaque article indique le modèle qui l\'a rédigé.'),
+      faq('Pourquoi « entreprise locale » est à 0 alors que ma fiche Google est complète ?', 'Ce sont deux choses différentes. La fiche Google Business Profile se gère sur Google. Le score lit le code de la page d\'accueil et cherche une déclaration « entreprise locale » (LocalBusiness), qui peut manquer même si votre fiche est parfaite.'),
+      faq('Que mesure le score ?', 'Un score sur 100 calculé avec des points précis : titres, descriptions, images décrites, liens cassés, pages trop courtes, plan du site, etc. Ce n\'est pas une note Google et il ne garantit aucun classement.'),
       faq('Pourquoi un chiffre est-il signalé « à vérifier » ?', 'L\'outil n\'a pas le droit d\'inventer des chiffres. Quand une statistique serait utile, il laisse un repère [SOURCE A VERIFIER] à remplacer par une source fiable, ou à supprimer.'),
       el('div', { class: 'card' }, el('h2', {}, 'Petit lexique'), el('dl', { class: 'gloss' },
         el('dt', {}, 'SEO'), el('dd', {}, 'Tout ce qui aide votre site à apparaître dans les recherches Google.'),
         el('dt', {}, 'Meta description'), el('dd', {}, 'Le petit texte affiché sous le titre de votre page dans Google.'),
-        el('dt', {}, 'Texte alternatif'), el('dd', {}, 'Une courte description d\'une image, lue par Google et par les lecteurs d\'écran.'),
-        el('dt', {}, 'Page orpheline'), el('dd', {}, 'Une page que personne ne relie : difficile à trouver pour les visiteurs et pour Google.'))),
+        el('dt', {}, 'Mot-clé principal'), el('dd', {}, 'L\'expression que l\'article veut faire trouver (« mot-clé principal » dans Yoast).'),
+        el('dt', {}, 'Texte alternatif'), el('dd', {}, 'Une courte description d\'une image, lue par Google et par les lecteurs d\'écran.'))),
       el('div', { class: 'card' }, el('h2', {}, 'Un problème ?'), el('p', {}, S.status.supportContact ? 'Contactez : ' + S.status.supportContact : 'Contactez la personne qui a mis en place cet outil.')),
     ];
   }
@@ -1035,7 +1029,7 @@
     $('app').classList.remove('hidden');
     await refresh();
     go('home');
-    api('/articles/batch/status').then((b) => { if (b.running) { S.batch = b; pollBatch(); } }).catch(() => {});
+    api('/write/status').then((b) => { if (b.running) { S.batch = b; pollBatch(); } }).catch(() => {});
   }
 
   $('login-form').addEventListener('submit', async (e) => {
