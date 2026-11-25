@@ -67,21 +67,88 @@ Le service doit tourner en une seule instance (les données sont dans des fichie
 
 Si la section est absente : le site doit être en HTTPS, et une extension de sécurité peut désactiver l'API REST ou ces mots de passe.
 
-## Clés et liaison WordPress, depuis les Réglages
+## Les réglages : trois onglets
 
-Tout se gère dans **Réglages**, sans redéployer :
+Tout se gère dans **Réglages**, sans redéployer. Sous chaque réglage, une phrase explique à quoi il sert.
 
-- **Connexions** : carte « Mise en route » (4 points à valider), mode démonstration, liaison WordPress (identifiant + mot de passe d'application, bouton « Enregistrer et tester »), clé PageSpeed.
-- **Rédaction** : clé OpenRouter, modèle, consignes.
+- **Connexions** : « Mise en route » (4 points à valider), mode démonstration, liaison WordPress, clé de rédaction (OpenRouter), clé PageSpeed.
+- **Rédaction** : modèle d'intelligence artificielle, instructions pour la rédaction, sujets d'articles, nom et zone de l'entreprise.
+- **Publication** : nombre d'articles par mois, mode de publication, publication automatique (règles, « Tout arrêter »), envoi en brouillon, essais en cours, journal des publications.
 
-**Mettre en place WordPress (une fois) :**
-1. Un administrateur crée le mot de passe d'application (section suivante).
-2. Réglages > Connexions > Liaison avec WordPress : coller l'identifiant et le mot de passe, puis « Enregistrer et tester ». Le message doit dire « Connexion réussie ... Créer des brouillons : oui ». Les erreurs sont expliquées (identifiant incorrect, site injoignable, API bloquée, droits insuffisants).
-3. Réglages > Rédaction : coller la clé OpenRouter, choisir le modèle, « Enregistrer et tester ».
-4. Réglages > Connexions : désactiver le mode démonstration (une confirmation est demandée).
-5. Réglages > Général : l'envoi automatique en brouillon est activé par défaut. Chaque article rédigé arrive dans WordPress au statut brouillon, catégorie « Blog » (créée si besoin).
+### Mettre en place WordPress et l'IA (une seule fois)
 
-**La publication reste manuelle, volontairement** : un texte rédigé par IA peut contenir des chiffres non vérifiés. Le bouton « Publier » exige la case « J'ai relu et validé », et le serveur refuse de publier tant que le marqueur `[SOURCE A VERIFIER]` reste dans le texte sur WordPress.
+1. Un administrateur crée le mot de passe d'application WordPress (section « Créer le mot de passe d'application »).
+2. Réglages > Connexions > Liaison avec WordPress : coller l'identifiant et le mot de passe, puis « Enregistrer et tester ». Le message doit dire « Connexion réussie ... Créer des brouillons : oui ».
+3. Réglages > Connexions > Clé de rédaction : coller la clé OpenRouter, puis « Enregistrer la clé ».
+4. Réglages > Rédaction > Modèle : coller l'identifiant du modèle, puis « Tester et activer le modèle » (voir ci-dessous).
+5. Réglages > Connexions : désactiver le mode démonstration (une confirmation est demandée).
+
+### Changer de modèle d'intelligence artificielle
+
+1. Aller dans Réglages > Rédaction, carte « Modèle d'intelligence artificielle ».
+2. Copier l'identifiant exact du modèle depuis openrouter.ai/models (exemple : `anthropic/claude-haiku-5-5`) dans le champ.
+3. Cliquer sur **« Tester et activer le modèle »**. L'outil envoie une toute petite demande (quelques mots) pour vérifier que le modèle répond.
+4. Deux résultats possibles :
+   - **« Modèle activé : [nom] »** : le modèle sera utilisé pour les prochains articles.
+   - **« Ce modèle n'a pas répondu : [raison] »** : le nouveau modèle n'est pas activé, **l'ancien reste en place**. Les raisons sont écrites simplement (identifiant inconnu, clé refusée, crédit épuisé, OpenRouter trop lent...).
+5. L'outil garde en mémoire le modèle précédent : le bouton « Revenir au modèle précédent » le réactive (après un nouveau test).
+
+À savoir :
+- Le modèle utilisé s'affiche en permanence sur la page Rédaction (« Rédigé avec : ... ») et sur chaque article (« Rédigé avec : ... »). Un ancien article garde le nom du modèle qui l'a rédigé.
+- Champ vide + « Tester et activer » : l'outil revient au modèle du serveur (variable `OPENROUTER_MODEL`, conservée comme valeur de secours). Sans modèle, rien ne peut être activé.
+- En mode démonstration, aucun test réel n'est fait et le modèle n'est pas changé : désactivez d'abord le mode démonstration.
+- Le modèle ne peut pas être changé autrement que par ce test.
+
+### Modifier les instructions pour la rédaction
+
+Réglages > Rédaction > « Instructions pour la rédaction » : c'est le texte envoyé à l'IA avec chaque sujet (ton, faits autorisés, mots interdits, structure). Modifier, puis « Enregistrer les instructions » : le changement s'applique aux prochains articles. « Rétablir le texte d'origine » remet le texte de départ (6000 caractères au maximum).
+
+- **Longueur** : l'outil impose toujours 600 à 900 mots, même si les instructions n'en parlent pas. Le **format de réponse** (titre, texte, faits à vérifier...) est lui aussi imposé par le code et n'est pas modifiable.
+- Si vous aviez déjà enregistré vos propres instructions dans Réglages, elles restent en place : le nouveau texte par défaut ne s'applique que si vous cliquez sur « Rétablir le texte d'origine ».
+- Les balises de tableau sont autorisées dans les articles (le texte par défaut demande un tableau comparatif quand le sujet s'y prête).
+
+### Longueur des articles (600 à 900 mots)
+
+- L'outil demande explicitement 600 à 900 mots au modèle, avec une limite de sortie de 6000 jetons (largement suffisant).
+- Le compteur de mots est fiable : les titres, paragraphes, listes et tableaux ne se collent plus entre eux.
+- Hors de la plage, une alerte s'affiche. L'article **n'est pas envoyé automatiquement** sur le site, et l'envoyer ou le publier à la main demande une confirmation. Le bouton **« Régénérer »** rédige un nouveau texte pour le même sujet (l'ancien reste dans l'historique). Une régénération compte comme un essai : 1 toutes les 3 secondes, 10 par jour.
+- Contrôles affichés sur chaque article : longueur, mots interdits (meilleur, leader, certifié, garanti, 100 %, à vie, révolutionnaire, sans risque, avec leur féminin et pluriel), marqueurs `[SOURCE A VERIFIER]`, faits à vérifier, tirets longs et flèches.
+
+### Modifier un article à la main
+
+Ouvrir l'article, puis « Modifier » : titre, mot-clé principal, titre et description pour Google, adresse de la page, texte, liste des faits à vérifier. Le bouton « Insérer un lien » ajoute un lien à l'endroit du curseur. L'aperçu et les contrôles se mettent à jour en écrivant. Les problèmes restants s'affichent, **sans bloquer l'enregistrement**.
+
+- Le texte modifié est celui qui part en brouillon. Si l'article est déjà un brouillon sur le site, il est mis à jour en même temps.
+- Si le texte a été modifié directement dans WordPress depuis le dernier envoi, une confirmation est demandée avant de l'écraser.
+- Si le site ne répond pas pendant l'enregistrement, le texte est gardé dans l'outil et la publication est bloquée jusqu'à ce que la mise à jour du site réussisse (réenregistrer suffit).
+- Chaque enregistrement garde la version d'avant (20 au maximum) : « Revenir à la version précédente », ou « Restaurer » sur une version plus ancienne. Rien n'est perdu : l'état actuel est lui aussi gardé.
+
+### Les trois modes de publication
+
+Réglages > Publication > « Mode de publication » :
+
+1. **Brouillon seulement** (par défaut, recommandé) : l'article part dans WordPress en brouillon. Personne ne le publie sans clic sur « Publier » (case « J'ai relu et validé » obligatoire).
+2. **Essai** : comme « brouillon seulement », mais l'article est marqué « essai » (préfixe `[ESSAI]` dans le titre sur WordPress, retiré à la publication). Tous les essais en cours sont listés. Publier un essai demande une confirmation.
+3. **Automatique** (désactivé par défaut) : ne s'active que par un interrupteur explicite, après l'avertissement « Les articles seront publiés sans relecture. Laurent doit avoir donné son accord écrit. »
+
+**Publication automatique : un article n'est publié que si toutes ces conditions sont remplies :**
+- aucun fait à vérifier dans la liste ;
+- un texte de 600 à 900 mots ;
+- aucun mot interdit ;
+- aucun marqueur `[SOURCE A VERIFIER]` ;
+- la date de publication prévue est atteinte : délai d'attente réglable (3 jours par défaut) après l'envoi sur le site, pendant lequel on peut annuler article par article ;
+- et pas plus de 2 articles publiés par semaine (réglable, semaine du lundi au dimanche, heure de Paris).
+
+Protections supplémentaires :
+- Le texte **présent sur le site** est relu (longueur, mots interdits, marqueurs) juste avant de publier : une correction ou une erreur faite dans WordPress est prise en compte.
+- Un article de démonstration, un « essai », un article annulé ou avec des modifications pas encore envoyées n'est jamais publié seul.
+- Seuls les articles créés **après l'activation** sont concernés : réactiver le mode automatique ne publie jamais d'anciens brouillons.
+- **« Tout arrêter »** suspend immédiatement les publications automatiques (relu avant chaque publication). « Reprendre » les relance. Vous pouvez toujours publier vous-même.
+- La vérification tourne toutes les heures, et sur demande (« Vérifier maintenant »). **Sur un hébergement gratuit qui s'endort, elle ne tourne pas pendant le sommeil du service.**
+- En mode automatique, l'envoi en brouillon est toujours actif (on ne publie que ce qui est déjà sur le site).
+- **Journal des publications** : chaque publication (manuelle ou automatique) est notée avec la date, l'heure, le titre et l'adresse. Il est effacé à un redémarrage sans disque persistant.
+
+**Etat de chaque article**, en clair en haut de sa fiche : « Brouillon, pas encore publié », « À vérifier avant publication » (longueur, mot interdit, source ou fait à vérifier) ou « Publié le [date] ».
 
 **Comment les clés saisies dans l'interface sont protégées :**
 - Chiffrées sur le serveur (AES-256-GCM, clé dérivée de `SESSION_SECRET`), jamais renvoyées au navigateur : on peut les remplacer ou les effacer, jamais les relire (seuls les 4 derniers caractères de la clé OpenRouter sont rappelés).
@@ -103,22 +170,13 @@ Tout se gère dans **Réglages**, sans redéployer :
 - En mode réel : les articles sont rédigés par l'IA, envoyés en brouillon dans WordPress, et **peuvent être vraiment publiés** (case « J'ai relu et validé » obligatoire, et refus tant que `[SOURCE A VERIFIER]` reste dans le texte sur WordPress).
 - Chaque article porte la marque du mode dans lequel il a été créé. Un article de démonstration n'existe pas sur le site : il ne peut pas être publié en mode réel, il ne compte pas dans le quota du lot réel, et un bouton permet de tous les supprimer sans toucher à WordPress. Inversement, un vrai brouillon ne peut ni être « publié » ni supprimé tant que le mode démonstration est actif.
 
-## Modèle et consignes modifiables depuis l'interface
-
-Dans Réglages, onglet « Rédaction » :
-- **Modèle OpenRouter** : identifiant à copier depuis openrouter.ai/models. Vide = celui de la variable `OPENROUTER_MODEL`.
-- **Consignes de rédaction** : le prompt système, modifiable (6000 caractères maximum). « Rétablir le texte d'origine » le remet comme au départ.
-- **Tester le modèle** : un appel de quelques mots pour vérifier la clé et l'identifiant avant de lancer un lot.
-- Le **format de réponse JSON** est toujours ajouté par le code et n'est pas modifiable : le serveur en a besoin pour lire l'article. Si vous supprimez les règles « pas de chiffres inventés » ou « pas de promesse de classement », elles ne sont plus imposées au modèle (le serveur signale seulement les prix et pourcentages dans les remarques de relecture).
-- Sur l'hébergement gratuit sans disque, ces réglages sont effacés à un redémarrage et on revient au texte d'origine et au modèle de `OPENROUTER_MODEL`.
-
 ## Choix faits (points ambigus)
 
-- **Génération puis envoi** : si l'envoi automatique est activé (par défaut), chaque article rédigé est envoyé à WordPress en brouillon. Sinon, il reste « À relire » jusqu'au clic sur « Envoyer en brouillon ». Dans tous les cas, la publication exige la case « J'ai relu et validé ».
+- **Génération puis envoi** : si l'envoi en brouillon est activé (par défaut, et toujours en mode automatique), chaque article rédigé dont la longueur est dans la plage (600 à 900 mots) est envoyé à WordPress en brouillon. Sinon, il reste « À relire » jusqu'au clic sur « Envoyer en brouillon ». Dans tous les cas, la publication à la main exige la case « J'ai relu et validé ».
 - **Lot** : au plus `fréquence − articles déjà rédigés ce mois-ci` articles, un par sujet pas encore traité ce mois-ci. Un deuxième clic ne relance donc pas d'appels inutiles.
-- **Fichier supplémentaire** : `data/articles.json` (articles en relecture), en plus de `settings.json` et `audits.json`.
+- **Fichiers supplémentaires** : `data/articles.json` (articles et leur historique de versions) et `data/publications.json` (journal des publications), en plus de `settings.json` et `audits.json`.
 - **Meta titre et meta description** : affichés dans l'écran de relecture, non envoyés à WordPress (le champ dépend de l'extension SEO). La meta description est mise dans l'extrait de l'article. À copier à la main dans Yoast / Rank Math.
-- **Contenu de l'article** : `htmlContent` ne contient pas le H1, c'est le titre de l'article WordPress. Le HTML est filtré (h2, h3, p, listes, a, strong, em). Les avertissements (longueur, tirets cadratins, marqueur de source) sont signalés, pas corrigés automatiquement.
+- **Contenu de l'article** : `htmlContent` ne contient pas le H1, c'est le titre de l'article WordPress. Le HTML est filtré (h2, h3, p, listes, tableaux, a, strong, em). Les contrôles (longueur, mots interdits, tirets longs, marqueurs de source) sont affichés sur chaque article, sans le modifier.
 - **Clé « faitsA verifier »** : le JSON demandé au modèle utilise `faitsAVerifier` (les variantes avec espace ou underscore sont acceptées).
 - **Liens internes** : le modèle ne peut choisir que parmi les URL du dernier audit (jusqu'à 40), pour ne pas inventer de pages.
 - **Suppression** : supprime aussi le brouillon dans WordPress (définitivement), mais refuse si l'article n'y est plus au statut brouillon.
@@ -162,10 +220,16 @@ Vérifié (`npm test` et essais manuels) :
 - Audit complet (sitemap, crawl, liens cassés, orphelines, robots.txt) contre un **faux site local**.
 - Client WordPress contre un **faux serveur WordPress local** (authentification Basic, catégorie Blog sans doublon, brouillon, publication, refus de supprimer un article publié).
 - API : connexion, validation, plafond du lot, parcours simulé génération, brouillon, publication, suppression.
-- Interface dans Chromium (bureau et téléphone) : connexion, mauvais mot de passe, réglages, lot simulé avec envoi automatique en brouillon, relecture, bouton Publier verrouillé tant que la case n'est pas cochée, écran Score, aucun défilement horizontal ni erreur JavaScript.
+- Longueur des articles : comptage des mots, plage 600 à 900 aux bornes, mots interdits (féminin, pluriel, sans faux positif), longueur demandée au modèle (message et format verrouillé), limite de sortie, réponse coupée détectée, tableaux conservés.
+- Changement de modèle : test avant activation, modèle conservé en cas d'échec (identifiant inconnu, clé refusée, crédit épuisé), modèle précédent, nom du modèle gardé sur chaque article.
+- Modification manuelle : texte nettoyé, historique et retour arrière, brouillon du site mis à jour, protection contre l'écrasement d'une modification faite dans WordPress, panne du site, régénération.
+- Modes de publication : automatique désactivé par défaut et confirmation obligatoire, chacune des conditions de publication automatique, texte du site relu avant publication, plafond par semaine (heure de Paris), « Tout arrêter » (y compris pendant une vérification), anciens brouillons jamais publiés, journal des publications, mode essai.
+- Chaque règle de sécurité a été cassée volontairement pour vérifier que les tests la détectent.
+- Interface dans Chromium (bureau et téléphone) : tout le parcours en mode réel contre un faux WordPress et un faux OpenRouter (réglages en trois onglets, modèle testé, instructions, modes de publication, alerte de longueur, régénération, écran Modifier avec lien et aperçu, historique, conflit WordPress, publication, journal, essai), sans défilement horizontal ni erreur JavaScript.
 
 **Non vérifié** (aucun accès à ces services depuis l'environnement de développement) :
-- Appels réels à OpenRouter : format de réponse JSON, respect des règles de rédaction par le modèle choisi, longueur 600 à 900 mots. Relisez les premiers articles avec soin.
+- Appels réels à OpenRouter : format de réponse JSON, respect des règles de rédaction par le modèle choisi, longueur 600 à 900 mots (le code l'exige et le contrôle, mais seul un vrai modèle montrera s'il s'y tient). Relisez les premiers articles avec soin.
+- Publication automatique contre le vrai WordPress de citylock.fr (testée uniquement contre un faux WordPress).
 - API réelle de citylock.fr : structure réelle du sitemap, comportement du thème, éventuels blocages (pare-feu, extension de sécurité) sur l'API REST ou sur l'audit.
 - Appel réel à PageSpeed Insights.
 - Déploiement sur Render ou Railway.
