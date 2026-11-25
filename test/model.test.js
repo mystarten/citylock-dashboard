@@ -119,25 +119,24 @@ test('chaque article généré porte le nom du modèle qui l\'a rédigé', async
   const call = await client(app);
   const saved = { ...process.env };
   try {
-    Object.assign(process.env, { SIMULATE: 'false', OPENROUTER_BASE_URL: `http://127.0.0.1:${or.address().port}`, OPENROUTER_MODEL: 'env/modele' });
+    Object.assign(process.env, { SIMULATE: 'false', WRITE_COOLDOWN_MS: '0', OPENROUTER_BASE_URL: `http://127.0.0.1:${or.address().port}`, OPENROUTER_MODEL: 'env/modele' });
     secrets.set('openrouterKey', 'cle-test-or-0000');
     store.saveArticles([]);
-    const st = store.getSettings(); st.aiModel = 'anthropic/claude-haiku-5-5'; st.autoDraft = false; store.saveSettings(st);
-    const t = await call('POST', '/api/articles/test', { keyword: 'serrure' });
+    const st = store.getSettings(); st.aiModel = 'anthropic/claude-haiku-5-5'; store.saveSettings(st);
+    const t = await call('POST', '/api/write/one', { keyword: 'serrure' });
     assert.strictEqual(t.json.article.modelUsed, 'anthropic/claude-haiku-5-5');
-    const kept = (await call('POST', '/api/articles/test/keep', { trialId: t.json.trialId })).json.article;
-    assert.strictEqual(kept.modelUsed, 'anthropic/claude-haiku-5-5');
+    const kept = t.json.article;
     assert.strictEqual((await call('GET', `/api/articles/${kept.id}`)).json.modelUsed, 'anthropic/claude-haiku-5-5');
     // le modèle change : l'ancien article garde SON modèle, le nouveau porte le nouveau
     const s2 = store.getSettings(); s2.aiModel = ''; store.saveSettings(s2);
-    const t2 = await call('POST', '/api/articles/test', { keyword: 'serrure 2' });
+    const t2 = await call('POST', '/api/write/one', { keyword: 'serrure 2' });
     assert.strictEqual(t2.json.article.modelUsed, 'env/modele');
     assert.strictEqual((await call('GET', `/api/articles/${kept.id}`)).json.modelUsed, 'anthropic/claude-haiku-5-5');
     // en démonstration : marqué comme tel
-    await call('PUT', '/api/settings', { frequency: 2, zone: 'Z', brandName: 'B', simulate: true });
-    assert.strictEqual((await call('POST', '/api/articles/test', { keyword: 'démo' })).json.article.modelUsed, 'démonstration');
+    await call('PUT', '/api/settings', { simulate: true });
+    assert.strictEqual((await call('POST', '/api/write/one', { keyword: 'démo' })).json.article.modelUsed, 'démonstration');
   } finally {
     secrets.set('openrouterKey', ''); const st = store.getSettings(); delete st.simulate; st.aiModel = ''; store.saveSettings(st);
-    Object.assign(process.env, saved); delete process.env.OPENROUTER_BASE_URL; app.close(); or.close();
+    Object.assign(process.env, saved); delete process.env.OPENROUTER_BASE_URL; delete process.env.WRITE_COOLDOWN_MS; app.close(); or.close();
   }
 });

@@ -9,7 +9,7 @@ process.env.DASHBOARD_USER = 'laurent-test';
 process.env.DASHBOARD_PASSWORD = 'mdp-de-test-123';
 process.env.SESSION_SECRET = 'secret-de-test-0123456789abcdef';
 process.env.SIMULATE = 'true';
-process.env.TRIAL_COOLDOWN_MS = '0';
+process.env.WRITE_COOLDOWN_MS = '0';
 
 const { bodyWords, setupReal } = require('./helpers');
 const store = require('../lib/store');
@@ -155,9 +155,9 @@ test('régénérer : même sujet, ancien texte gardé, longueur corrigée, limit
     assert.deepStrictEqual([v.length, v[0].title], [1, 'Trop court']); // l'ancien texte est retrouvable
     assert.strictEqual((await call('POST', `/api/articles/${a.id}/revert`, {})).json.article.title, 'Trop court');
     // limiteur : une régénération compte comme un essai (cadence)
-    process.env.TRIAL_COOLDOWN_MS = '60000';
+    process.env.WRITE_COOLDOWN_MS = '60000';
     assert.strictEqual((await call('POST', `/api/articles/${a.id}/regenerate`, {})).status, 429);
-    process.env.TRIAL_COOLDOWN_MS = '0';
+    process.env.WRITE_COOLDOWN_MS = '0';
   } finally { stop(); }
 });
 

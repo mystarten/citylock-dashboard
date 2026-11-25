@@ -68,7 +68,7 @@ test('client WordPress réel contre faux WP : catégorie, brouillon, publication
   } finally { Object.assign(process.env, saved); s.close(); }
 });
 
-test('API : auth, validation, lot simulé, brouillon, publication, suppression', async () => {
+test('API : auth, validation, un article, planning, programmation, publication, suppression (mode démonstration)', async () => {
   const s = await listen(server);
   const base = `http://127.0.0.1:${s.address().port}`;
   let cookie = '';
@@ -79,75 +79,143 @@ test('API : auth, validation, lot simulé, brouillon, publication, suppression',
     let json = null; try { json = await res.json(); } catch { /* */ }
     return { status: res.status, json };
   };
+  const saved = { ...process.env };
   try {
+    process.env.WRITE_COOLDOWN_MS = '0';
     assert.strictEqual((await call('GET', '/api/settings')).status, 401);
     assert.strictEqual((await call('POST', '/api/login', { username: 'laurent-test', password: 'faux' })).status, 401);
     assert.strictEqual((await call('POST', '/api/login', { username: 'autre', password: 'mdp-de-test-123' })).status, 401);
     assert.strictEqual((await call('POST', '/api/login', { username: 'laurent-test', password: 'mdp-de-test-123' }, { 'X-Requested-With': 'x' })).status, 403); // CSRF
     assert.strictEqual((await call('POST', '/api/login', { username: 'laurent-test', password: 'mdp-de-test-123', remember: true })).status, 200);
 
-    assert.strictEqual((await call('PUT', '/api/settings', { frequency: 9, zone: 'a', brandName: 'b' })).status, 400);
-    assert.strictEqual((await call('PUT', '/api/settings', { frequency: 'x', zone: 'a', brandName: 'b' })).status, 400);
-    assert.strictEqual((await call('PUT', '/api/settings', { frequency: 2, zone: '', brandName: 'b' })).status, 400);
-    assert.strictEqual((await call('PUT', '/api/settings', { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', autoDraft: false })).status, 200);
-    assert.strictEqual((await call('PUT', '/api/settings', { frequency: 2, zone: 'a', brandName: 'b', autoDraft: 'oui' })).status, 400);
+    // réglages : le prompt est obligatoire et vient d'ici ; longueurs cohérentes
+    const set0 = (await call('GET', '/api/settings')).json;
+    assert.ok(set0.systemPrompt.includes('FORMAT DE RÉPONSE') && set0.systemPrompt.includes('entre 600 et 900 mots'), 'le prompt d\'origine est enregistré dans les réglages au premier lancement');
+    assert.deepStrictEqual([set0.minWords, set0.maxWords, set0.promptProblems], [600, 900, []]);
+    assert.strictEqual((await call('PUT', '/api/settings', { zone: '' })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { systemPrompt: 'court' })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { systemPrompt: '' })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { systemPrompt: 'x'.repeat(6001) })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { minWords: 900, maxWords: 600 })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { minWords: 'x' })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { simulate: 'oui' })).status, 400);
+    const mine = 'Consigne personnalisée sans le format. '.repeat(5);
+    const putMine = await call('PUT', '/api/settings', { systemPrompt: mine });
+    assert.strictEqual(putMine.status, 200);
+    assert.strictEqual(putMine.json.systemPrompt, mine.trim());
+    assert.strictEqual(putMine.json.promptProblems.length, 3, 'avertissement : pas de JSON, ni title ni htmlContent');
+    const defs = (await call('GET', '/api/ai/defaults')).json;
+    assert.ok(defs.systemPrompt.includes('N\'invente aucun chiffre') && defs.maxLength === 6000);
+    assert.strictEqual((await call('PUT', '/api/settings', { systemPrompt: defs.systemPrompt })).json.systemPrompt, defs.systemPrompt); // « rétablir »
+    // le modèle ne peut PAS être changé par la sauvegarde des réglages
+    assert.strictEqual((await call('PUT', '/api/settings', { aiModel: 'pirate/modele-non-teste' })).json.aiModel, '');
+    assert.strictEqual((await call('GET', '/api/settings')).json.zone, 'Chatou, Yvelines'); // les champs absents ne sont pas écrasés
 
     assert.strictEqual((await call('POST', '/api/topics', { keyword: '  ' })).status, 400);
     for (const kw of ['alarme sans abonnement', 'alarme Ajax', 'installation alarme']) assert.strictEqual((await call('POST', '/api/topics', { keyword: kw, city: 'Chatou' })).status, 201);
     assert.strictEqual((await call('POST', '/api/topics', { keyword: 'alarme Ajax', city: 'Chatou' })).status, 409);
 
-    // Lot : fréquence 2 pour 3 sujets => 2 articles maximum
-    assert.strictEqual((await call('POST', '/api/articles/batch')).status, 202);
-    for (let i = 0; i < 50; i++) { if (!(await call('GET', '/api/articles/batch/status')).json.running) break; await new Promise((r) => setTimeout(r, 100)); }
-    let list = (await call('GET', '/api/articles')).json;
-    assert.strictEqual(list.length, 2);
-    assert.strictEqual((await call('POST', '/api/articles/batch')).status, 409); // lot complet
-    const a = list[0];
+    // Mode « Un article »
+    assert.strictEqual((await call('POST', '/api/write/one', {})).status, 400);
+    assert.strictEqual((await call('POST', '/api/write/one', { topicId: 'inconnu' })).status, 404);
+    const one = await call('POST', '/api/write/one', { keyword: 'alarme maison', city: 'Chatou' });
+    assert.strictEqual(one.status, 200);
+    const a = one.json.article;
+    assert.deepStrictEqual([a.status, a.simulated, a.state.label], ['a_relire', true, 'À vérifier avant publication']);
     assert.ok(a.faitsAVerifier.length && a.htmlContent.includes('[SOURCE A VERIFIER]'));
+    assert.ok(a.check.inRange && a.check.words >= 600, 'article de démonstration dans la plage');
 
-    // Publication impossible avant l'envoi en brouillon et sans validation
-    assert.strictEqual((await call('POST', `/api/articles/${a.id}/publish`, { validated: true })).status, 409);
-    assert.strictEqual((await call('POST', `/api/articles/${a.id}/send`)).status, 200);
-    assert.strictEqual((await call('POST', `/api/articles/${a.id}/send`)).status, 409);
-    assert.strictEqual((await call('POST', `/api/articles/${a.id}/publish`, {})).status, 400);
-    assert.strictEqual((await call('POST', `/api/articles/${a.id}/publish`, { validated: true })).status, 200);
-    assert.strictEqual((await call('DELETE', `/api/articles/${a.id}`)).status, 409); // publié : suppression refusée
-    assert.strictEqual((await call('DELETE', `/api/articles/${list[1].id}`)).status, 200);
-    assert.strictEqual((await call('GET', '/api/articles')).json.length, 1);
+    // Programmer : refusé tant que la date, la longueur et le marqueur ne sont pas réglés
+    assert.strictEqual((await call('POST', `/api/articles/${a.id}/schedule`, {})).status, 400);                               // pas de date
+    assert.strictEqual((await call('POST', `/api/articles/${a.id}/schedule`, { date: '2020-01-01' })).status, 400);           // passée
+    assert.strictEqual((await call('POST', `/api/articles/${a.id}/schedule`, { date: '2099-01-01' })).status, 400);           // trop lointaine
+    const future = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10);
+    assert.strictEqual((await call('POST', `/api/articles/${a.id}/schedule`, { date: future })).status, 409);                 // marqueur de source
+    const fixed = await call('PUT', `/api/articles/${a.id}`, { htmlContent: bodyWords(300), faitsAVerifier: [] });
+    assert.strictEqual(fixed.status, 200);
+    const short = await call('POST', `/api/articles/${a.id}/schedule`, { date: future });
+    assert.deepStrictEqual([short.status, short.json.code], [409, 'out_of_range']);                                              // 300 mots
+    await call('PUT', `/api/articles/${a.id}`, { htmlContent: bodyWords(700) });
+    const sched = await call('POST', `/api/articles/${a.id}/schedule`, { date: future, time: '10:30' });
+    assert.strictEqual(sched.status, 200);
+    assert.strictEqual(sched.json.status, 'programme');
+    assert.ok(sched.json.state.label.startsWith('Programmé le '));
+    assert.ok(sched.json.scheduledAt && sched.json.wpId);
+    assert.strictEqual((await call('POST', `/api/articles/${a.id}/send`)).status, 409);       // déjà sur le site
+    assert.strictEqual((await call('POST', `/api/articles/${a.id}/unschedule`)).json.status, 'brouillon_wp');
+    assert.strictEqual((await call('POST', `/api/articles/${a.id}/unschedule`)).status, 409);
+    assert.strictEqual((await call('POST', `/api/articles/${a.id}/schedule`, { date: future })).status, 200);
+    assert.strictEqual((await call('POST', `/api/articles/${a.id}/publish`, {})).status, 400);                                  // validation obligatoire
+    const pub = await call('POST', `/api/articles/${a.id}/publish`, { validated: true });
+    assert.deepStrictEqual([pub.status, pub.json.status, pub.json.publishedBy], [200, 'publie', 'manuel']);
+    assert.strictEqual((await call('DELETE', `/api/articles/${a.id}`)).status, 409);                                            // publié : suppression refusée
+    const journal = (await call('GET', '/api/publications')).json;
+    assert.deepStrictEqual(journal.map((e) => e.kind).slice(0, 3), ['publication', 'programmation', 'annulation']);
 
-    // Modèle et consignes modifiables depuis les réglages
-    const base = { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', autoDraft: true };
-    // le modèle ne peut PAS être changé par la sauvegarde des réglages : il faut passer par le test d'activation
-    assert.strictEqual((await call('PUT', '/api/settings', { ...base, aiModel: 'pirate/modele-non-teste' })).json.aiModel, '');
-    assert.strictEqual((await call('PUT', '/api/settings', { ...base, systemPrompt: 'court' })).status, 400);
-    assert.strictEqual((await call('PUT', '/api/settings', { ...base, systemPrompt: 'x'.repeat(6001) })).status, 400);
-    const okSet = await call('PUT', '/api/settings', { ...base, systemPrompt: 'Consigne personnalisée. '.repeat(10) });
-    assert.strictEqual(okSet.status, 200);
-    assert.ok(okSet.json.systemPrompt.startsWith('Consigne personnalisée.'));
-    const defs = (await call('GET', '/api/ai/defaults')).json;
-    assert.ok(defs.systemPrompt.includes('N\'invente aucun chiffre') && defs.maxLength === 6000);
-    // un texte identique à l'original n'est pas enregistré comme personnalisé
-    assert.strictEqual((await call('PUT', '/api/settings', { ...base, systemPrompt: defs.systemPrompt })).json.systemPrompt, '');
-    assert.strictEqual((await call('GET', '/api/settings')).json.frequency, 2); // les champs absents ne sont pas écrasés
+    // Envoi simple en brouillon, date prévue, suppression
+    const two = (await call('POST', '/api/write/one', { topicId: (await call('GET', '/api/settings')).json.topics[0].id })).json.article;
+    assert.strictEqual((await call('POST', `/api/articles/${two.id}/send`)).json.status, 'brouillon_wp');
+    assert.strictEqual((await call('PUT', `/api/articles/${two.id}/planned`, { plannedDate: 'pas une date' })).status, 400);
+    assert.strictEqual((await call('PUT', `/api/articles/${two.id}/planned`, { plannedDate: future })).json.plannedDate, future);
+    assert.strictEqual((await call('DELETE', `/api/articles/${two.id}`)).status, 200);
 
-    // Envoi automatique en brouillon : le nouvel article arrive directement au statut brouillon WordPress
-    assert.strictEqual((await call('PUT', '/api/settings', { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', autoDraft: true })).status, 200);
-    assert.strictEqual((await call('POST', '/api/articles/batch')).status, 202);
-    for (let i = 0; i < 50; i++) { if (!(await call('GET', '/api/articles/batch/status')).json.running) break; await new Promise((r) => setTimeout(r, 100)); }
-    list = (await call('GET', '/api/articles')).json;
-    assert.strictEqual(list.length, 2);
-    assert.ok(list.some((x) => x.status === 'brouillon_wp' && x.wpId), 'autoDraft : brouillon attendu');
+    // Ce qui part à l'IA est visible
+    const prev = await call('POST', '/api/write/preview', { keyword: 'serrure', city: 'Sartrouville' });
+    assert.ok(prev.json.sent.user.includes('Mot-clé principal : serrure') && prev.json.sent.system.includes('N\'invente aucun chiffre'));
+
+    // Mode « Plusieurs articles » : validation du planning
+    const today = new Date().toISOString().slice(0, 10);
+    assert.strictEqual((await call('POST', '/api/write/plan', { months: 7, perMonth: 2, startDate: future })).status, 400);
+    assert.strictEqual((await call('POST', '/api/write/plan', { months: 2, perMonth: 4, startDate: future })).status, 400);
+    assert.strictEqual((await call('POST', '/api/write/plan', { months: 2, perMonth: 2, startDate: '2020-01-01' })).status, 400);
+    assert.strictEqual((await call('POST', '/api/write/plan', { months: 2, perMonth: 2 })).status, 400);
+    const plan = await call('POST', '/api/write/plan', { months: 2, perMonth: 2, startDate: future });
+    assert.strictEqual(plan.status, 200);
+    assert.strictEqual(plan.json.items.length, 4);
+    assert.strictEqual(plan.json.missing, 1, '3 sujets pour 4 articles : une ligne à compléter à la main');
+    assert.strictEqual((await call('POST', '/api/write/batch', { items: plan.json.items })).status, 400); // ligne sans mot-clé
+    plan.json.items[3].keyword = 'serrure connectée';
+    assert.ok(plan.json.items.every((it) => /^\d{4}-\d{2}-\d{2}$/.test(it.plannedDate)));
+    assert.deepStrictEqual(plan.json.items.map((i) => i.plannedDate), [...plan.json.items.map((i) => i.plannedDate)].sort());
+    assert.ok(today <= plan.json.items[0].plannedDate);
+
+    // Rédaction du planning en arrière-plan : des brouillons datés, rien sur le site
+    assert.strictEqual((await call('POST', '/api/write/batch', { items: [] })).status, 400);
+    assert.strictEqual((await call('POST', '/api/write/batch', { items: [{ keyword: 'x', plannedDate: '2020-01-01' }] })).status, 400);
+    assert.strictEqual((await call('POST', '/api/write/batch', { items: plan.json.items })).status, 202);
+    for (let i = 0; i < 50; i++) { if (!(await call('GET', '/api/write/status')).json.running) break; await new Promise((r) => setTimeout(r, 100)); }
+    const st = (await call('GET', '/api/write/status')).json;
+    assert.deepStrictEqual([st.total, st.done, st.errors.length], [4, 4, 0]);
+    assert.strictEqual(st.notes.length, 0);
+    const list = (await call('GET', '/api/articles')).json;
+    assert.strictEqual(list.filter((x) => x.plannedDate).length, 4);
+    assert.ok(list.every((x) => x.status !== 'programme'));
+
+    // « Programmer tout » : ceux qui ont un souci sont laissés de côté, avec la raison
+    const all = (await call('POST', '/api/articles/schedule-all', {})).json;
+    assert.deepStrictEqual([all.scheduled.length, all.skipped.length], [0, 4]);
+    assert.ok(all.skipped[0].reasons.some((r) => /marqueur/.test(r)), 'marqueur de source : jamais programmé automatiquement');
+    // on corrige deux articles, puis on programme
+    for (const x of list.slice(0, 2)) await call('PUT', `/api/articles/${x.id}`, { htmlContent: bodyWords(700), faitsAVerifier: [] });
+    const all2 = (await call('POST', '/api/articles/schedule-all', {})).json;
+    assert.deepStrictEqual([all2.scheduled.length, all2.skipped.length], [2, 2]);
+    assert.ok((await call('GET', '/api/articles')).json.filter((x) => x.status === 'programme').length === 2);
+
+    // Limite journalière
+    process.env.WRITES_PER_DAY = '1';
+    assert.strictEqual((await call('POST', '/api/write/one', { keyword: 'x' })).status, 429);
+    delete process.env.WRITES_PER_DAY;
+
     assert.strictEqual((await call('GET', '/api/wp/test')).json.ok, true);
-
     // Aucun secret dans le front
     for (const f of ['index.html', 'app.js']) {
       const txt = fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
       assert.ok(!/OPENROUTER_API_KEY|WP_APP_PASSWORD|sk-or-v1-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{30,}/.test(txt), 'variable ou clé en clair dans ' + f);
     }
-  } finally { s.close(); }
+  } finally { Object.assign(process.env, saved); delete process.env.WRITE_COOLDOWN_MS; s.close(); }
 });
 
-test('OpenRouter : le modèle et les consignes des réglages sont bien utilisés (faux serveur local)', async () => {
+test('OpenRouter : le modèle et le prompt des réglages sont utilisés tels quels (faux serveur local)', async () => {
   const seen = [];
   const srv = http.createServer((req, res) => {
     let body = '';
@@ -166,19 +234,16 @@ test('OpenRouter : le modèle et les consignes des réglages sont bien utilisés
   try {
     Object.assign(process.env, { SIMULATE: 'false', OPENROUTER_BASE_URL: `http://127.0.0.1:${srv.address().port}`, OPENROUTER_API_KEY: 'sk-or-test-1234567890', OPENROUTER_MODEL: 'env/modele' });
     const topic = { keyword: 'alarme', city: 'Chatou' };
-    const rules = 'MES CONSIGNES A MOI. '.repeat(8);
+    const prompt = 'MES CONSIGNES A MOI. Réponds en JSON avec title et htmlContent. '.repeat(3);
 
-    await ai.generateArticle(topic, { brandName: 'CITYLOCK', zone: 'Chatou', aiModel: 'anthropic/claude-haiku-5-5', systemPrompt: rules });
-    let req = seen.pop();
+    await ai.generateArticle(topic, { brandName: 'CITYLOCK', zone: 'Chatou', aiModel: 'anthropic/claude-haiku-5-5', systemPrompt: prompt });
+    const req = seen.pop();
     assert.strictEqual(req.j.model, 'anthropic/claude-haiku-5-5');                    // modèle des réglages
-    assert.ok(req.j.messages[0].content.startsWith('MES CONSIGNES A MOI.'));          // consignes personnalisées
-    assert.ok(req.j.messages[0].content.includes('FORMAT DE REPONSE'));               // contrat JSON toujours ajouté
+    assert.strictEqual(req.j.messages[0].content, prompt.trim());                     // le prompt des réglages, rien d'ajouté ni de retiré
     assert.strictEqual(req.auth, 'Bearer sk-or-test-1234567890');
 
-    await ai.generateArticle(topic, { brandName: 'CITYLOCK', zone: 'Chatou', aiModel: '', systemPrompt: '' });
-    req = seen.pop();
-    assert.strictEqual(req.j.model, 'env/modele');                                    // repli sur la variable du serveur
-    assert.ok(req.j.messages[0].content.includes('N\'invente aucun chiffre'));               // consignes d'origine
+    await ai.generateArticle(topic, { brandName: 'CITYLOCK', zone: 'Chatou', aiModel: '', systemPrompt: prompt });
+    assert.strictEqual(seen.pop().j.model, 'env/modele');                             // repli sur la variable du serveur
 
     assert.deepStrictEqual(await ai.testModel({ aiModel: '' }), { ok: true, model: 'env/modele' });
     await assert.rejects(() => ai.testModel({ aiModel: 'mauvais/modele' }), /code 400.*Vérifiez l'identifiant du modèle/);
@@ -289,143 +354,138 @@ test('WordPress : identifiants de l\'interface utilisés, diagnostic en 2 étape
 });
 
 // ---------- Parcours réel complet (faux WordPress + faux OpenRouter) : sujets, lot, essai, publication, modes ----------
-test('sujets pris en compte, lot réel, essai, publication réelle et garde-fous démonstration/réel', async () => {
-  const secrets = require('../lib/secrets');
-  const store = require('../lib/store');
-  const fake = create();
-  const wpSrv = await listen(fake.app);
-  const orReqs = [];
-  const orSrv = http.createServer((req, res) => {
-    let body = ''; req.on('data', (c) => { body += c; });
-    req.on('end', () => {
-      const j = JSON.parse(body); orReqs.push(j);
-      const short = /Mot-clé principal : article court/.test(j.messages[1].content);
-      const art = { title: 'Titre ' + orReqs.length, metaTitle: 'M', metaDescription: 'D', slug: 'titre-' + orReqs.length, htmlContent: (short ? '<p>texte très court</p>' : bodyWords(650)) + '<p>Selon le secteur, [SOURCE A VERIFIER] des cambriolages.</p>', internalLinkSuggestions: [], faitsAVerifier: ['stat'] };
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(art) } }] }));
-    });
-  });
-  await new Promise((r) => orSrv.listen(0, '127.0.0.1', r));
-  const saved = { ...process.env };
-  const app = await listen(server);
-  const base = `http://127.0.0.1:${app.address().port}`;
-  let cookie = '';
-  const call = async (method, p, body) => {
-    const res = await fetch(base + p, { method, headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'citylock', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
-    const sc = res.headers.get('set-cookie'); if (sc) cookie = sc.split(';')[0];
-    let json = null; try { json = await res.json(); } catch { /* */ }
-    return { status: res.status, json };
-  };
-  const waitBatch = async () => { for (let i = 0; i < 80; i++) { if (!(await call('GET', '/api/articles/batch/status')).json.running) return; await new Promise((r) => setTimeout(r, 50)); } };
+test('mode réel : sujets pris en compte, planning rédigé, programmation sur WordPress, garde-fous démonstration/réel', async () => {
+  const { setupReal } = require('./helpers');
+  const r = await setupReal(server);
+  const { call, fake, store, orState } = r;
+  process.env.WRITE_COOLDOWN_MS = '0';
   try {
-    delete process.env.WP_USER; delete process.env.WP_APP_PASSWORD;
-    Object.assign(process.env, { SIMULATE: 'false', TRIAL_COOLDOWN_MS: '0', WP_BASE_URL: `http://127.0.0.1:${wpSrv.address().port}`, OPENROUTER_BASE_URL: `http://127.0.0.1:${orSrv.address().port}` });
-    // état propre
-    store.saveArticles([]);
-    const st = store.getSettings(); st.topics = []; st.frequency = 2; st.autoDraft = true; delete st.simulate; st.aiModel = 'anthropic/claude-haiku-5-5'; st.systemPrompt = ''; store.saveSettings(st);
-    await call('POST', '/api/login', { username: 'laurent-test', password: 'mdp-de-test-123' });
-    await call('PUT', '/api/secrets', { openrouterKey: 'cle-test-or-0000', wpUser: 'laurent', wpAppPassword: 'abcd efgh' });
-    for (const [keyword, city] of [['alarme sans abonnement', 'Chatou'], ['alarme Ajax maison', 'Yvelines'], ['installation alarme', '']]) await call('POST', '/api/topics', { keyword, city });
+    store.saveSettings({ ...store.getSettings(), topics: [
+      { id: 't1', keyword: 'alarme sans abonnement', city: 'Chatou' },
+      { id: 't2', keyword: 'alarme Ajax maison', city: 'Yvelines' },
+      { id: 't3', keyword: 'installation alarme', city: '' },
+    ] });
+    const future = (d) => new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
 
-    // 1. le plan annonce les bons sujets, dans l'ordre, limités à la fréquence
-    let plan = (await call('GET', '/api/articles/plan')).json;
-    assert.deepStrictEqual([plan.remaining, plan.totalTopics, plan.next.map((t) => t.keyword)], [2, 3, ['alarme sans abonnement', 'alarme Ajax maison']]);
+    // 1. un article : le sujet ET la ville partent à l'IA, avec le modèle et le prompt des réglages
+    const one = await call('POST', '/api/write/one', { topicId: 't1' });
+    assert.strictEqual(one.status, 200);
+    const req0 = orState.requests[0];
+    assert.ok(req0.messages[1].content.includes('Mot-clé principal : alarme sans abonnement') && req0.messages[1].content.includes('Ville ciblée : Chatou'));
+    assert.strictEqual(req0.model, 'test/modele');
+    assert.strictEqual(req0.messages[0].content, store.getSettings().systemPrompt.trim());
+    assert.ok(one.json.article.check.inRange && one.json.article.check.words === 650);
+    assert.strictEqual(fake.wpPosts.size, 0, 'rien sur le site tant que vous ne l\'avez pas décidé');
 
-    // 2. un article de démonstration existant ne bloque pas le lot réel
-    store.saveArticles([{ id: 'demo-1', topicId: 'x', keyword: 'demo', city: '', month: plan.month, status: 'a_relire', simulated: true, title: 'Démo', htmlContent: '<p>x</p>', metaTitle: '', metaDescription: '', slug: 'demo', faitsAVerifier: [], internalLinkSuggestions: [], warnings: [], wordCount: 1, createdAt: new Date().toISOString() }]);
-    plan = (await call('GET', '/api/articles/plan')).json;
-    assert.strictEqual(plan.remaining, 2);
-
-    // 3. lot réel : les sujets (mot-clé ET ville) sont bien envoyés à l'IA, avec le modèle choisi
-    assert.strictEqual((await call('POST', '/api/articles/batch')).status, 202);
-    await waitBatch();
-    assert.strictEqual(orReqs.length, 2);
-    assert.ok(orReqs[0].messages[1].content.includes('Mot-clé principal : alarme sans abonnement') && orReqs[0].messages[1].content.includes('Ville ciblée : Chatou'));
-    assert.ok(orReqs[1].messages[1].content.includes('Mot-clé principal : alarme Ajax maison') && orReqs[1].messages[1].content.includes('Ville ciblée : Yvelines'));
-    assert.ok(orReqs.every((r) => r.model === 'anthropic/claude-haiku-5-5'));
+    // 2. planning de 2 mois, 2 articles par mois : les sujets tournent, les dates sont celles proposées
+    const plan = await call('POST', '/api/write/plan', { months: 2, perMonth: 2, startDate: future(3) });
+    assert.deepStrictEqual(plan.json.items.slice(0, 3).map((i) => i.keyword), ['alarme sans abonnement', 'alarme Ajax maison', 'installation alarme']);
+    assert.strictEqual(plan.json.missing, 1);
+    const chosen = plan.json.items.map((it, i) => (i === 1 ? { ...it, plannedDate: future(40) } : i === 3 ? { ...it, keyword: 'serrure connectée' } : it)); // l'utilisateur change une date et complète la dernière ligne
+    assert.strictEqual((await call('POST', '/api/write/batch', { items: chosen })).status, 202);
+    for (let i = 0; i < 80; i++) { if (!(await call('GET', '/api/write/status')).json.running) break; await new Promise((x) => setTimeout(x, 50)); }
+    assert.strictEqual(orState.calls, 5); // 1 article + 4 du planning
     let list = (await call('GET', '/api/articles')).json;
-    const real = list.filter((a) => !a.simulated);
-    assert.deepStrictEqual(real.map((a) => a.status), ['brouillon_wp', 'brouillon_wp']);
-    assert.ok(real.every((a) => fake.wpPosts.get(a.wpId).status === 'draft'), 'brouillons réellement créés dans le faux WordPress');
-    plan = (await call('GET', '/api/articles/plan')).json;
-    assert.deepStrictEqual([plan.remaining, plan.next.length], [0, 0]);
-    assert.strictEqual((await call('POST', '/api/articles/batch')).status, 409);
+    assert.strictEqual(list.length, 5);
+    assert.ok(list.filter((a) => a.plannedDate).some((a) => a.plannedDate === future(40)), 'la date choisie est conservée');
+    assert.strictEqual(fake.wpPosts.size, 0, 'la rédaction du planning n\'envoie RIEN sur le site');
 
-    // 4. essai : rien n'est envoyé à WordPress, le quota n'est pas touché, le prompt est visible
-    const postsBefore = fake.wpPosts.size;
-    const trial = await call('POST', '/api/articles/test', { keyword: 'serrure connectée', city: 'Sartrouville' });
-    assert.strictEqual(trial.status, 200);
-    assert.ok(trial.json.sent.user.includes('Mot-clé principal : serrure connectée') && trial.json.sent.user.includes('Ville ciblée : Sartrouville'));
-    assert.ok(trial.json.sent.system.includes('N\'invente aucun chiffre') && trial.json.sent.system.includes('FORMAT DE REPONSE'));
-    assert.strictEqual(trial.json.sent.model, 'anthropic/claude-haiku-5-5');
-    assert.strictEqual(fake.wpPosts.size, postsBefore);
-    assert.strictEqual((await call('GET', '/api/articles')).json.length, list.length);
-    assert.strictEqual((await call('POST', '/api/articles/test', {})).status, 400);
-    assert.strictEqual((await call('POST', '/api/articles/test', { topicId: 'inconnu' })).status, 404);
-    const topicTrial = await call('POST', '/api/articles/test', { topicId: (await call('GET', '/api/settings')).json.topics[2].id });
-    assert.ok(topicTrial.json.sent.user.includes('Mot-clé principal : installation alarme') && !topicTrial.json.sent.user.includes('Ville ciblée'));
-    // garder l'essai : il devient un article normal (et part en brouillon), une seule fois
-    const kept = await call('POST', '/api/articles/test/keep', { trialId: topicTrial.json.trialId });
-    assert.strictEqual(kept.json.article.status, 'brouillon_wp');
-    assert.strictEqual((await call('POST', '/api/articles/test/keep', { trialId: topicTrial.json.trialId })).status, 404);
-    // longueur : un article hors de 600 à 900 mots n'est PAS envoyé automatiquement, et l'envoi manuel exige une confirmation
-    const shortTrial = await call('POST', '/api/articles/test', { keyword: 'article court' });
-    assert.ok(shortTrial.json.check.words < 600 && shortTrial.json.check.inRange === false);
-    assert.ok(shortTrial.json.check.issues.some((i) => i.code === 'length'));
-    const postsBeforeShort = fake.wpPosts.size;
-    const shortKept = await call('POST', '/api/articles/test/keep', { trialId: shortTrial.json.trialId });
-    assert.deepStrictEqual([shortKept.json.article.status, shortKept.json.autoDraftSkipped, fake.wpPosts.size], ['a_relire', 'length', postsBeforeShort]);
-    const sendNo = await call('POST', `/api/articles/${shortKept.json.article.id}/send`);
-    assert.deepStrictEqual([sendNo.status, sendNo.json.code, fake.wpPosts.size], [409, 'out_of_range', postsBeforeShort]);
-    assert.strictEqual((await call('POST', `/api/articles/${shortKept.json.article.id}/send`, { confirmOutOfRange: true })).status, 200);
-    assert.strictEqual(fake.wpPosts.size, postsBeforeShort + 1);
-    await call('DELETE', `/api/articles/${shortKept.json.article.id}`);
+    // 3. programmer tout : sur le faux WordPress, statut « future » à la date choisie (heure de Paris -> UTC)
+    const all = (await call('POST', '/api/articles/schedule-all', {})).json;
+    assert.deepStrictEqual([all.scheduled.length, all.skipped.length], [4, 0]);
+    const posts = [...fake.wpPosts.values()];
+    assert.ok(posts.length === 4 && posts.every((p) => p.status === 'future' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$/.test(p.date_gmt)));
+    const sched = (await call('GET', '/api/articles')).json.filter((a) => a.status === 'programme');
+    assert.strictEqual(sched.length, 4);
+    for (const a of sched) assert.ok(new Date(a.scheduledAt).getUTCHours() >= 7 && new Date(a.scheduledAt).getUTCHours() <= 8, 'publication à 9 h, heure de Paris');
 
-    // limites : cadence et plafond journalier
-    process.env.TRIAL_COOLDOWN_MS = '60000';
-    assert.strictEqual((await call('POST', '/api/articles/test', { keyword: 'x' })).status, 429);
-    process.env.TRIAL_COOLDOWN_MS = '0'; process.env.TRIALS_PER_DAY = '1';
-    assert.strictEqual((await call('POST', '/api/articles/test', { keyword: 'x' })).status, 429);
-    delete process.env.TRIALS_PER_DAY;
-
-    // 5. publication réelle : refusée tant que le marqueur reste dans WordPress, puis vraie publication
+    // 4. WordPress publie tout seul : le tableau de bord s'en aperçoit (sans rien publier lui-même)
+    const target = sched[0];
+    fake.wpPosts.get(target.wpId).status = 'publish';
+    process.env.SYNC_MIN_INTERVAL_MS = '0';
+    store.saveArticle({ ...store.getArticles().find((a) => a.id === target.id), scheduledAt: new Date(Date.now() - 3600000).toISOString() });
     list = (await call('GET', '/api/articles')).json;
-    const target = list.find((a) => !a.simulated && a.status === 'brouillon_wp');
-    assert.strictEqual((await call('POST', `/api/articles/${target.id}/publish`, { validated: true })).status, 409);
-    assert.strictEqual(fake.wpPosts.get(target.wpId).status, 'draft');
-    fake.wpPosts.get(target.wpId).content = '<p>Texte corrigé avec une vraie source.</p>';
-    assert.strictEqual((await call('POST', `/api/articles/${target.id}/publish`, {})).status, 400);
-    const pub = await call('POST', `/api/articles/${target.id}/publish`, { validated: true });
+    assert.deepStrictEqual([list.find((a) => a.id === target.id).status, list.find((a) => a.id === target.id).publishedBy], ['publie', 'programmation']);
+    delete process.env.SYNC_MIN_INTERVAL_MS;
+
+    // 5. annuler une programmation : l'article redevient brouillon sur le site
+    const other = sched[1];
+    assert.strictEqual((await call('POST', `/api/articles/${other.id}/unschedule`)).json.status, 'brouillon_wp');
+    assert.strictEqual(fake.wpPosts.get(other.wpId).status, 'draft');
+
+    // 6. publier un article programmé : la date future est ramenée à maintenant
+    const third = sched[2];
+    const pub = await call('POST', `/api/articles/${third.id}/publish`, { validated: true });
     assert.strictEqual(pub.status, 200);
-    assert.strictEqual(fake.wpPosts.get(target.wpId).status, 'publish', 'publié pour de vrai dans WordPress');
+    const p3 = fake.wpPosts.get(third.wpId);
+    assert.strictEqual(p3.status, 'publish');
+    assert.ok(Math.abs(new Date(p3.date_gmt + 'Z').getTime() - Date.now()) < 60000, 'date remise à maintenant');
 
-    // 6. garde-fous : un article de démonstration ne touche jamais WordPress en mode réel
-    assert.strictEqual((await call('POST', '/api/articles/demo-1/send')).status, 409);
-    const wpCallsBefore = fake.wpPosts.size;
-    assert.strictEqual((await call('DELETE', '/api/articles/demo-1')).status, 200);
-    assert.strictEqual(fake.wpPosts.size, wpCallsBefore);
-    store.saveArticles([...store.getArticles(), { id: 'demo-2', topicId: null, keyword: 'd', city: '', month: plan.month, status: 'brouillon_wp', wpId: 900001, simulated: true, title: 'd', htmlContent: '<p>x</p>', metaTitle: '', metaDescription: '', slug: 'd', faitsAVerifier: [], internalLinkSuggestions: [], warnings: [], wordCount: 1, createdAt: new Date().toISOString() }]);
-    assert.strictEqual((await call('POST', '/api/articles/demo-2/publish', { validated: true })).status, 409);
-    assert.strictEqual((await call('POST', '/api/articles/purge-demo')).json.removed, 1);
+    // 7. article trop court : ni envoi, ni programmation sans confirmation ; pas d'envoi automatique
+    const shortOne = await call('POST', '/api/write/one', { keyword: 'article court' });
+    assert.ok(shortOne.json.article.check.words < 600 && shortOne.json.article.check.issues.some((i) => i.code === 'length'));
+    const before = fake.wpPosts.size;
+    assert.deepStrictEqual([(await call('POST', `/api/articles/${shortOne.json.article.id}/send`)).json.code, fake.wpPosts.size], ['out_of_range', before]);
+    assert.strictEqual((await call('POST', `/api/articles/${shortOne.json.article.id}/schedule`, { date: future(5) })).json.code, 'out_of_range');
+    assert.strictEqual((await call('POST', `/api/articles/${shortOne.json.article.id}/send`, { confirmOutOfRange: true })).status, 200);
 
-    // 7. en mode démonstration, un VRAI brouillon ne peut être ni publié ni supprimé pour de faux
-    const draftReal = list.find((a) => !a.simulated && a.status === 'brouillon_wp' && a.id !== target.id);
-    await call('PUT', '/api/settings', { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', simulate: true });
-    assert.strictEqual((await call('GET', '/api/status')).json.simulate, true);
+    // 8. marqueur de source : refusé même après envoi si le texte du site le contient
+    const markerArt = r.add(r.make({ htmlContent: bodyWords(650) + '<p>Selon [SOURCE A VERIFIER] des cambriolages.</p>' }));
+    assert.strictEqual((await call('POST', `/api/articles/${markerArt.id}/schedule`, { date: future(5) })).json.code, 'marker');
+    assert.strictEqual((await call('PUT', `/api/articles/${markerArt.id}`, { htmlContent: bodyWords(650) })).status, 200);
+    assert.strictEqual((await call('POST', `/api/articles/${markerArt.id}/schedule`, { date: future(5) })).status, 200);
+
+    // 9. garde-fous : un article de démonstration ne touche jamais WordPress en mode réel
+    const demo = r.add(r.make({ simulated: true }));
+    assert.strictEqual((await call('POST', `/api/articles/${demo.id}/send`)).status, 409);
+    const wpBefore = fake.wpPosts.size;
+    assert.strictEqual((await call('DELETE', `/api/articles/${demo.id}`)).status, 200);
+    assert.strictEqual(fake.wpPosts.size, wpBefore);
+    assert.strictEqual((await call('POST', '/api/articles/purge-demo')).json.removed, 0);
+
+    // 10. en mode démonstration, un VRAI article de WordPress ne peut être ni publié ni supprimé pour de faux
+    const draftReal = (await call('GET', '/api/articles')).json.find((a) => a.id === other.id);
+    await call('PUT', '/api/settings', { simulate: true });
     assert.strictEqual((await call('POST', `/api/articles/${draftReal.id}/publish`, { validated: true })).status, 409);
     assert.strictEqual((await call('DELETE', `/api/articles/${draftReal.id}`)).status, 409);
     assert.strictEqual(fake.wpPosts.get(draftReal.wpId).status, 'draft', 'rien n\'a été publié par erreur');
-    // en démonstration, l'essai est marqué comme tel, et « garder » refuse si le mode change entre-temps
-    const demoTrial = await call('POST', '/api/articles/test', { keyword: 'essai démo' });
-    assert.strictEqual(demoTrial.json.simulated, true);
-    await call('PUT', '/api/settings', { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', simulate: false });
-    assert.strictEqual((await call('POST', '/api/articles/test/keep', { trialId: demoTrial.json.trialId })).status, 409);
-  } finally {
-    for (const k of ['openrouterKey', 'wpAppPassword', 'pagespeedKey']) secrets.set(k, '');
-    const st = store.getSettings(); delete st.simulate; st.wpUser = ''; st.aiModel = ''; st.topics = []; store.saveSettings(st);
-    Object.assign(process.env, saved); delete process.env.OPENROUTER_BASE_URL; delete process.env.TRIAL_COOLDOWN_MS; delete process.env.TRIALS_PER_DAY;
-    app.close(); wpSrv.close(); orSrv.close();
-  }
+    await call('PUT', '/api/settings', { simulate: false });
+  } finally { delete process.env.WRITE_COOLDOWN_MS; delete process.env.SYNC_MIN_INTERVAL_MS; r.stop(); }
+});
+
+test('Yoast : champs envoyés si le site les accepte, repli sans erreur sinon, état visible', async () => {
+  const { setupReal } = require('./helpers');
+  const r = await setupReal(server);
+  const { call, fake, store } = r;
+  try {
+    wp._resetYoast();
+    // extrait de code non installé : le brouillon part quand même, sans Yoast
+    const a = r.add(r.make({ keyword: 'alarme sans fil', metaTitle: 'Titre SEO', metaDescription: 'Description SEO' }));
+    assert.deepStrictEqual((await call('GET', '/api/wp/yoast')).json, { known: true, ok: false });
+    const sent = await call('POST', `/api/articles/${a.id}/send`);
+    assert.strictEqual(sent.status, 200);
+    assert.strictEqual(sent.json.yoast, false);
+    assert.strictEqual(fake.wpPosts.get(sent.json.wpId).meta, undefined);
+
+    // extrait installé : mot-clé principal, titre SEO et description arrivent dans Yoast
+    fake.state.yoast = true; wp._resetYoast();
+    assert.deepStrictEqual((await call('GET', '/api/wp/yoast')).json, { known: true, ok: true });
+    const b = r.add(r.make({ keyword: 'alarme sans fil', metaTitle: 'Titre SEO', metaDescription: 'Description SEO' }));
+    const sentB = await call('POST', `/api/articles/${b.id}/send`);
+    assert.strictEqual(sentB.json.yoast, true);
+    assert.deepStrictEqual(fake.wpPosts.get(sentB.json.wpId).meta, { _yoast_wpseo_focuskw: 'alarme sans fil', _yoast_wpseo_title: 'Titre SEO', _yoast_wpseo_metadesc: 'Description SEO' });
+    // une modification met aussi Yoast à jour
+    await call('PUT', `/api/articles/${b.id}`, { metaDescription: 'Nouvelle description', keyword: 'alarme maison' });
+    const m = fake.wpPosts.get(sentB.json.wpId).meta;
+    assert.deepStrictEqual([m._yoast_wpseo_metadesc, m._yoast_wpseo_focuskw], ['Nouvelle description', 'alarme maison']);
+    // et la programmation aussi
+    const future = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+    assert.strictEqual((await call('POST', `/api/articles/${b.id}/schedule`, { date: future })).json.yoast, true);
+    // le site perd l'extrait de code : repli sans erreur
+    fake.state.yoast = false; wp._resetYoast();
+    const c = r.add(r.make());
+    assert.strictEqual((await call('POST', `/api/articles/${c.id}/send`)).status, 200);
+  } finally { r.stop(); }
 });
 
 test('score : critère « entreprise locale » explicite, progression et export CSV', async () => {

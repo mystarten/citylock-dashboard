@@ -57,24 +57,30 @@ test('marqueur de source, faits à vérifier, tirets et flèches', () => {
   assert.ok(d.issues.some((i) => i.code === 'dash') && d.blocking === false); // simple remarque
 });
 
-test('instruction par défaut : texte fourni, moins de 6000 caractères, règles clés présentes', () => {
+test('instruction par défaut : texte fourni, moins de 6000 caractères, règles clés, format et longueur dedans', () => {
   assert.ok(DEFAULT_RULES.length < ai.MAX_RULES_LENGTH, `${DEFAULT_RULES.length} caractères`);
   assert.ok(DEFAULT_RULES.startsWith('Tu es rédacteur web pour Citylock, installateur d\'alarmes Ajax sans abonnement à Chatou'));
   for (const phrase of ['06 56 69 60 05 et 01 39 12 46 60', 'du lundi au vendredi, de 9h30 à 19h30', 'Mots interdits : « meilleur », « leader », « certifié », « garanti », « 100 % », « à vie », « révolutionnaire », « sans risque »',
-    'Longueur : 600 à 900 mots', 'Un bloc « Questions fréquentes »', 'systeme-dalarme-avec-abonnement/', 'Ne vise jamais « alarme sans abonnement » ou « alarme autonome » comme mot-clé principal.']) {
+    'Longueur : 600 à 900 mots', 'Un bloc « Questions fréquentes »', 'systeme-dalarme-avec-abonnement/', 'Ne vise jamais « alarme sans abonnement » ou « alarme autonome » comme mot-clé principal.',
+    'FORMAT DE RÉPONSE', '"title"', '"htmlContent"', '"faitsAVerifier"', 'entre 600 et 900 mots']) {
     assert.ok(DEFAULT_RULES.includes(phrase), 'manque : ' + phrase);
   }
-  assert.strictEqual(ai.DEFAULT_RULES, DEFAULT_RULES); // c'est bien celle qui est envoyée
-  assert.ok(ai.buildSystemPrompt({}).startsWith(DEFAULT_RULES));
+  assert.strictEqual(ai.DEFAULT_RULES, DEFAULT_RULES);
+  assert.deepStrictEqual(ai.promptProblems(DEFAULT_RULES), []);
 });
 
-test('la longueur est demandée explicitement au modèle, et le format JSON reste verrouillé', () => {
-  const sys = ai.buildSystemPrompt({ systemPrompt: 'Instruction personnalisée sans aucune mention de longueur. '.repeat(3) });
-  assert.ok(sys.includes('FORMAT DE REPONSE') && sys.includes('"title"') && sys.includes('"htmlContent"') && sys.includes('"faitsAVerifier"'));
-  assert.ok(sys.includes('entre 600 et 900 mots'), 'le contrat verrouillé impose la longueur même si les instructions personnalisées l\'oublient');
+test('un seul prompt : celui des réglages, rien n\'est ajouté par le code', () => {
+  const mine = 'Mon prompt à moi, sans longueur. Réponds en JSON avec title et htmlContent. '.repeat(2);
+  assert.strictEqual(ai.buildSystemPrompt({ systemPrompt: `  ${mine}  ` }), mine.trim());
+  assert.strictEqual(ai.buildSystemPrompt({}), '');            // pas de repli caché
+  assert.strictEqual(ai.buildSystemPrompt({ systemPrompt: '' }), '');
   const user = ai.buildUserPrompt({ keyword: 'serrure', city: 'Chatou' }, { brandName: 'C', zone: 'Z' }, []);
-  assert.ok(user.includes('entre 600 et 900 mots'));
+  assert.ok(user.includes('Mot-clé principal : serrure') && user.includes('Ville ciblée : Chatou'));
+  assert.ok(!/mots/.test(user), 'la longueur ne vient pas du code : ' + user);
   assert.ok(ai.GENERATION_MAX_TOKENS >= 4000);
+  // avertissements affichés dans les réglages
+  assert.strictEqual(ai.promptProblems('Écris un article. '.repeat(10)).length, 3);
+  assert.ok(ai.promptProblems('Réponds en JSON : {"title":"","htmlContent":""}').length === 0);
 });
 
 test('limite de sortie suffisante, tableaux conservés, réponse coupée détectée (faux OpenRouter)', async () => {
@@ -94,12 +100,14 @@ test('limite de sortie suffisante, tableaux conservés, réponse coupée détect
   const saved = { ...process.env };
   try {
     Object.assign(process.env, { SIMULATE: 'false', OPENROUTER_BASE_URL: `http://127.0.0.1:${srv.address().port}`, OPENROUTER_API_KEY: 'cle-test-0000', OPENROUTER_MODEL: 'env/modele' });
-    const art = await ai.generateArticle({ keyword: 'alarme', city: '' }, { brandName: 'C', zone: 'Z', aiModel: '', systemPrompt: '' }, []);
+    const art = await ai.generateArticle({ keyword: 'alarme', city: '' }, { brandName: 'C', zone: 'Z', aiModel: '', systemPrompt: DEFAULT_RULES }, []);
     assert.strictEqual(seen[0].max_tokens, ai.GENERATION_MAX_TOKENS);
     assert.ok(art.wordCount >= 700 && rules.inRange(art.wordCount));
     assert.ok(art.htmlContent.includes('<table>') && art.htmlContent.includes('<td>Valeur</td>'), 'le tableau n\'est pas retiré par le filtre');
     assert.strictEqual(art.modelUsed, 'env/modele');
+    await assert.rejects(() => ai.generateArticle({ keyword: 'alarme' }, { brandName: 'C', zone: 'Z', systemPrompt: '' }, []), /Aucune instruction/);
+    await assert.rejects(() => ai.generateArticle({ keyword: 'alarme' }, { brandName: 'C', zone: 'Z', systemPrompt: 'Prompt sans le format demandé. '.repeat(5) }, []), /JSON/);
     mode = 'cut';
-    await assert.rejects(() => ai.generateArticle({ keyword: 'alarme' }, { brandName: 'C', zone: 'Z' }, []), /coupée avant la fin/);
+    await assert.rejects(() => ai.generateArticle({ keyword: 'alarme' }, { brandName: 'C', zone: 'Z', systemPrompt: DEFAULT_RULES }, []), /coupée avant la fin/);
   } finally { Object.assign(process.env, saved); delete process.env.OPENROUTER_BASE_URL; srv.close(); }
 });
