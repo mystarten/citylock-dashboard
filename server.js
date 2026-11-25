@@ -259,6 +259,13 @@ async function liveHash(a) {
   try { return arts.hashContent(a.simulated || isSimulated() ? a.htmlContent : await wp.getContent(a.wpId)); } catch { return arts.hashContent(a.htmlContent); }
 }
 const wpReady = () => isSimulated() || wp.configured();
+// Enregistre UN article en relisant la liste à jour : un lot qui ajoute des articles pendant une longue opération
+// (régénération, envoi) ne peut ainsi jamais être écrasé.
+function saveArticle(a) {
+  const latest = store.getArticles();
+  const i = latest.findIndex((x) => x.id === a.id);
+  if (i >= 0) { latest[i] = a; store.saveArticles(latest); }
+}
 const findArticle = (id) => {
   const list = store.getArticles();
   const a = list.find((x) => x.id === id);
@@ -336,6 +343,16 @@ const trialsPerDay = () => Number(process.env.TRIALS_PER_DAY) || 10;
 const trialCooldown = () => (process.env.TRIAL_COOLDOWN_MS !== undefined ? Number(process.env.TRIAL_COOLDOWN_MS) : 3000);
 const parisDay = () => new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris' }).format(new Date());
 
+// Un appel payant à la demande (essai ou régénération) : 1 toutes les 3 secondes, 10 par jour.
+function takeTrialSlot() {
+  if (Date.now() - lastTrialAt < trialCooldown()) throw fail(429, 'Patientez quelques secondes avant un nouvel essai.');
+  const day = parisDay();
+  if (trialCount.day !== day) { trialCount.day = day; trialCount.n = 0; }
+  if (trialCount.n >= trialsPerDay()) throw fail(429, `Limite de ${trialsPerDay()} essais par jour atteinte (pour limiter les appels payants). Réessayez demain.`);
+  lastTrialAt = Date.now();
+  trialCount.n += 1;
+}
+
 app.post('/api/articles/test', wrap(async (req, res) => {
   const b = req.body || {};
   const s = store.getSettings();
@@ -352,12 +369,7 @@ app.post('/api/articles/test', wrap(async (req, res) => {
     if (!secrets.get('openrouterKey')) throw fail(400, 'La clé OpenRouter n\'est pas configurée. Saisissez-la dans Réglages, Rédaction.');
     if (!ai.effectiveModel(s)) throw fail(400, 'Aucun modèle OpenRouter choisi. Indiquez-en un dans Réglages, Rédaction.');
   }
-  if (Date.now() - lastTrialAt < trialCooldown()) throw fail(429, 'Patientez quelques secondes avant un nouvel essai.');
-  const day = parisDay();
-  if (trialCount.day !== day) { trialCount.day = day; trialCount.n = 0; }
-  if (trialCount.n >= trialsPerDay()) throw fail(429, `Limite de ${trialsPerDay()} essais par jour atteinte (pour limiter les appels payants). Réessayez demain.`);
-  lastTrialAt = Date.now();
-  trialCount.n += 1;
+  takeTrialSlot();
 
   const pages = lastAuditPages();
   const sent = ai.previewPrompt(topic, s, pages);
@@ -385,13 +397,113 @@ app.post('/api/articles/test/keep', wrap(async (req, res) => {
   res.json({ article: articleView(rec), autoDraftError, autoDraftSkipped: rec.autoDraftSkipped || '' });
 }));
 
+// ---------- Modification manuelle, historique, régénération ----------
+const lines = (v) => (Array.isArray(v) ? v : String(v || '').split(/\r?\n/)).map((x) => clean(String(x), 300)).filter(Boolean).slice(0, 30);
+
+// Valide les champs reçus. Seuls les champs présents sont retournés.
+function cleanEditFields(b) {
+  const f = {};
+  if (b.title !== undefined) { f.title = clean(b.title, 200); if (!f.title) throw fail(400, 'Le titre est obligatoire.'); }
+  if (b.metaTitle !== undefined) f.metaTitle = clean(b.metaTitle, 300);
+  if (b.metaDescription !== undefined) f.metaDescription = clean(b.metaDescription, 500);
+  if (b.keyword !== undefined) { f.keyword = clean(b.keyword, 100); if (!f.keyword) throw fail(400, 'Le mot-clé principal est obligatoire.'); }
+  if (b.slug !== undefined) f.slug = ai.slugify(String(b.slug)).slice(0, 80);
+  if (b.htmlContent !== undefined) {
+    if (typeof b.htmlContent !== 'string') throw fail(400, 'Texte invalide.');
+    if (b.htmlContent.length > 60000) throw fail(400, 'Le texte est trop long (60 000 caractères maximum).');
+    f.htmlContent = ai.sanitizeHtml(b.htmlContent.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ''));
+    if (!f.htmlContent) throw fail(400, 'Le texte est vide.');
+  }
+  if (b.faitsAVerifier !== undefined) f.faitsAVerifier = lines(b.faitsAVerifier);
+  if (f.slug === '' && f.title) f.slug = ai.slugify(f.title).slice(0, 80);
+  return f;
+}
+
+// Enregistre un changement (modification, retour arrière, régénération) et, si l'article est déjà un brouillon
+// sur le site, met aussi ce brouillon à jour. Sans cela, publier enverrait l'ancien texte.
+async function commitEdit(list, a, fields, label, { force = false } = {}) {
+  const onSite = a.status === 'brouillon_wp' && !!a.wpId && !a.simulated;
+  if (onSite) assertSameMode(a, 'modifier');
+  let checkError = '';
+  if (onSite && !force && a.wpSyncHash) {
+    try {
+      if (arts.hashContent(await wp.getContent(a.wpId)) !== a.wpSyncHash) {
+        throw fail(409, 'Le texte a été modifié directement dans WordPress depuis le dernier envoi. Enregistrer ici écraserait ces changements. Confirmez pour les écraser.', 'wp_changed');
+      }
+    } catch (e) { if (e.code === 'wp_changed') throw e; checkError = e.message; }
+  }
+  if (fields) arts.applyFields(a, fields, label);
+  let syncError = '';
+  if (onSite) {
+    if (checkError) { a.siteDirty = true; syncError = checkError; }
+    else {
+      try { await wp.updateDraft(a.wpId, a); a.wpSyncHash = await liveHash(a); a.siteDirty = false; } catch (e) { a.siteDirty = true; syncError = e.message; log.error('Mise à jour du brouillon sur le site échouée', e); }
+    }
+  }
+  saveArticle(a);
+  return { article: articleView(a), syncError, siteUpdated: onSite && !syncError };
+}
+
+app.put('/api/articles/:id', wrap(async (req, res) => {
+  const { list, a } = findArticle(req.params.id);
+  if (a.status === 'publie') throw fail(409, 'Cet article est publié : modifiez-le directement dans WordPress.');
+  const fields = cleanEditFields(req.body || {});
+  const changed = !arts.sameFields(a, fields);
+  if (!changed && !a.siteDirty) return res.json({ article: articleView(a), unchanged: true });
+  res.json(await commitEdit(list, a, changed ? fields : null, 'Modification manuelle', { force: !!(req.body && req.body.force) }));
+}));
+
+app.get('/api/articles/:id/versions', wrap((req, res) => res.json({ versions: arts.versionList(findArticle(req.params.id).a) })));
+
+// Revenir à une version précédente (par défaut la dernière). L'état actuel est gardé dans l'historique : rien n'est perdu.
+app.post('/api/articles/:id/revert', wrap(async (req, res) => {
+  const { list, a } = findArticle(req.params.id);
+  if (a.status === 'publie') throw fail(409, 'Cet article est publié : modifiez-le directement dans WordPress.');
+  const versions = a.versions || [];
+  if (!versions.length) throw fail(409, 'Il n\'y a pas de version précédente.');
+  const idx = req.body && req.body.index !== undefined ? Number(req.body.index) : versions.length - 1;
+  if (!Number.isInteger(idx) || idx < 0 || idx >= versions.length) throw fail(400, 'Version introuvable.');
+  const v = versions[idx];
+  a.versions = versions.filter((_, i) => i !== idx);
+  const fields = { title: v.title, metaTitle: v.metaTitle, metaDescription: v.metaDescription, slug: v.slug, keyword: v.keyword, htmlContent: v.htmlContent, faitsAVerifier: [...v.faitsAVerifier] };
+  res.json(await commitEdit(list, a, fields, 'Version restaurée', { force: !!(req.body && req.body.force) }));
+}));
+
+// Régénérer : un nouvel article pour le même sujet. L'ancien texte reste dans l'historique.
+app.post('/api/articles/:id/regenerate', wrap(async (req, res) => {
+  const { list, a } = findArticle(req.params.id);
+  if (a.status === 'publie') throw fail(409, 'Cet article est publié : il ne peut plus être régénéré ici.');
+  assertSameMode(a, 'régénérer');
+  const s = store.getSettings();
+  if (!isSimulated()) {
+    if (!secrets.get('openrouterKey')) throw fail(400, 'La clé OpenRouter n\'est pas configurée. Saisissez-la dans Réglages, Connexions.');
+    if (!ai.effectiveModel(s)) throw fail(400, 'Aucun modèle OpenRouter choisi. Indiquez-en un dans Réglages, Rédaction.');
+  }
+  takeTrialSlot();
+  const art = await ai.generateArticle({ keyword: a.keyword, city: a.city }, s, lastAuditPages());
+  a.modelUsed = art.modelUsed;
+  a.internalLinkSuggestions = art.internalLinkSuggestions;
+  delete a.autoDraftSkipped;
+  const fields = { title: art.title, metaTitle: art.metaTitle, metaDescription: art.metaDescription, slug: art.slug, htmlContent: art.htmlContent, faitsAVerifier: art.faitsAVerifier };
+  res.json(await commitEdit(list, a, fields, 'Régénération', { force: !!(req.body && req.body.force) }));
+}));
+
+// Aperçu et contrôle d'un texte en cours d'écriture (rien n'est enregistré).
+app.post('/api/preview', wrap((req, res) => {
+  const b = req.body || {};
+  if (b.htmlContent !== undefined && typeof b.htmlContent !== 'string') throw fail(400, 'Texte invalide.');
+  const html = ai.sanitizeHtml(String(b.htmlContent || '').slice(0, 60000));
+  const check = rules.checkArticle({ title: clean(b.title, 200), metaTitle: clean(b.metaTitle, 300), metaDescription: clean(b.metaDescription, 500), htmlContent: html, faitsAVerifier: lines(b.faitsAVerifier) });
+  res.json({ html, check });
+}));
+
 app.post('/api/articles/:id/send', wrap(async (req, res) => {
   const { list, a } = findArticle(req.params.id);
   if (a.status !== 'a_relire') throw fail(409, 'Cet article a déjà été envoyé à WordPress.');
   assertSameMode(a, 'envoyer');
   confirmLength(a, req);
   await pushDraft(a);
-  store.saveArticles(list);
+  saveArticle(a);
   res.json(articleView(a));
 }));
 
@@ -400,6 +512,7 @@ app.post('/api/articles/:id/publish', wrap(async (req, res) => {
   if (!req.body || req.body.validated !== true) throw fail(400, 'Vous devez confirmer « J\'ai relu et validé ».');
   if (a.status !== 'brouillon_wp') throw fail(409, 'Envoyez d\'abord l\'article en brouillon WordPress.');
   assertSameMode(a, 'publier');
+  if (a.siteDirty) throw fail(409, 'Vos dernières modifications ne sont pas encore envoyées sur le site. Ouvrez « Modifier » et enregistrez à nouveau pour réessayer.', 'site_dirty');
   confirmLength(a, req);
   // Garde-fou : on relit le texte réellement présent dans WordPress (il a pu être corrigé là-bas).
   if (!isSimulated()) {
@@ -408,7 +521,7 @@ app.post('/api/articles/:id/publish', wrap(async (req, res) => {
   }
   const r = await wp.publish(a.wpId);
   Object.assign(a, { status: 'publie', wpLink: r.link || a.wpLink, publishedAt: new Date().toISOString() });
-  store.saveArticles(list);
+  saveArticle(a);
   res.json(articleView(a));
 }));
 
@@ -417,7 +530,7 @@ app.delete('/api/articles/:id', wrap(async (req, res) => {
   if (a.status === 'publie') throw fail(409, 'Cet article est publié : supprimez-le directement dans WordPress.');
   // Un article de démonstration n'existe pas sur le site : on ne touche jamais à WordPress pour lui.
   if (a.status === 'brouillon_wp' && a.wpId && !a.simulated) { assertSameMode(a, 'supprimer sur le site'); await wp.deleteDraft(a.wpId); }
-  store.saveArticles(list.filter((x) => x.id !== a.id));
+  store.saveArticles(store.getArticles().filter((x) => x.id !== a.id));
   res.json({ ok: true });
 }));
 

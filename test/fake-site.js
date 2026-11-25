@@ -39,10 +39,11 @@ function create({ robots = true } = {}) {
   app.post('/wp-json/wp/v2/categories', (req, res) => { const c = { id: 7, ...req.body }; wpCats.push(c); res.status(201).json(c); });
   app.post('/wp-json/wp/v2/posts', (req, res) => { const p = { id: ++nextId, link: `http://x/?p=${nextId}`, ...req.body }; wpPosts.set(p.id, p); res.status(201).json(p); });
   app.get('/wp-json/wp/v2/posts/:id', (req, res) => (wpPosts.has(+req.params.id) ? res.json({ ...wpPosts.get(+req.params.id), content: { raw: wpPosts.get(+req.params.id).content } }) : res.status(404).json({ code: 'rest_post_invalid_id' })));
-  app.post('/wp-json/wp/v2/posts/:id', (req, res) => { const p = wpPosts.get(+req.params.id); Object.assign(p, req.body); res.json(p); });
+  const state = { failWrites: false };
+  app.post('/wp-json/wp/v2/posts/:id', (req, res) => { if (state.failWrites) return res.status(500).json({ code: 'panne_simulee' }); const p = wpPosts.get(+req.params.id); Object.assign(p, req.body); res.json(p); });
   app.delete('/wp-json/wp/v2/posts/:id', (req, res) => { wpPosts.delete(+req.params.id); res.json({ deleted: true }); });
 
-  return { app, wpPosts, wpCats };
+  return { app, wpPosts, wpCats, state };
 }
 
 module.exports = { create };
