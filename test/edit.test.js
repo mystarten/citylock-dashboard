@@ -1,6 +1,5 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -12,45 +11,11 @@ process.env.SESSION_SECRET = 'secret-de-test-0123456789abcdef';
 process.env.SIMULATE = 'true';
 process.env.TRIAL_COOLDOWN_MS = '0';
 
-const { listen, client, bodyWords } = require('./helpers');
-const { create } = require('./fake-site');
+const { bodyWords, setupReal } = require('./helpers');
 const store = require('../lib/store');
-const secrets = require('../lib/secrets');
 const server = require('../server');
 
-// Prépare : faux WordPress + faux OpenRouter, mode réel, un article « à relire » ou « brouillon ».
-async function setup() {
-  const fake = create();
-  const wpSrv = await listen(fake.app);
-  let n = 0;
-  const orSrv = http.createServer((req, res) => {
-    let b = ''; req.on('data', (c) => { b += c; });
-    req.on('end', () => {
-      n += 1;
-      const art = { title: `Titre généré ${n}`, metaTitle: 'M', metaDescription: 'D', slug: `titre-${n}`, htmlContent: bodyWords(650), internalLinkSuggestions: [], faitsAVerifier: [] };
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(art) } }] }));
-    });
-  });
-  await new Promise((r) => orSrv.listen(0, '127.0.0.1', r));
-  const app = await listen(server);
-  const call = await client(app);
-  const saved = { ...process.env };
-  delete process.env.WP_USER; delete process.env.WP_APP_PASSWORD;
-  Object.assign(process.env, { SIMULATE: 'false', WP_BASE_URL: `http://127.0.0.1:${wpSrv.address().port}`, OPENROUTER_BASE_URL: `http://127.0.0.1:${orSrv.address().port}` });
-  secrets.set('openrouterKey', 'cle-test-or-0000'); secrets.set('wpAppPassword', 'abcd efgh');
-  const st = store.getSettings(); st.wpUser = 'laurent'; st.aiModel = 'test/modele'; st.autoDraft = false; st.topics = []; store.saveSettings(st);
-  store.saveArticles([]);
-  const make = (extra = {}) => ({ id: 'art-' + Math.random().toString(36).slice(2), topicId: null, keyword: 'alarme maison', city: 'Chatou', month: '2026-11', createdAt: new Date().toISOString(), status: 'a_relire', wpId: null, wpLink: null, simulated: false,
-    title: 'Titre initial', metaTitle: 'M', metaDescription: 'D', slug: 'titre-initial', htmlContent: bodyWords(650), internalLinkSuggestions: [], faitsAVerifier: [], warnings: [], wordCount: 650, versionAt: new Date().toISOString(), versionLabel: 'Texte généré', ...extra });
-  const add = (a) => { store.saveArticles([...store.getArticles(), a]); return a; };
-  const stop = () => {
-    secrets.set('openrouterKey', ''); secrets.set('wpAppPassword', '');
-    const s2 = store.getSettings(); delete s2.simulate; s2.wpUser = ''; s2.aiModel = ''; store.saveSettings(s2);
-    Object.assign(process.env, saved); delete process.env.OPENROUTER_BASE_URL; app.close(); wpSrv.close(); orSrv.close();
-  };
-  return { fake, call, make, add, stop };
-}
+const setup = () => setupReal(server);
 
 test('modification manuelle : champs enregistrés, texte nettoyé, contrôles recalculés sans bloquer', async () => {
   const { call, make, add, stop } = await setup();

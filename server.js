@@ -14,6 +14,7 @@ const secrets = require('./lib/secrets');
 const { isSimulated } = require('./lib/config');
 const rules = require('./lib/rules');
 const arts = require('./lib/articles');
+const publishing = require('./lib/publishing');
 
 // --- Configuration obligatoire ---
 if (!process.env.DASHBOARD_USER || !process.env.DASHBOARD_PASSWORD || !process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 16) {
@@ -97,6 +98,14 @@ app.put('/api/settings', wrap((req, res) => {
   if (!zone || !brandName) throw fail(400, 'La zone desservie et le nom commercial sont obligatoires.');
   if (b.autoDraft !== undefined && typeof b.autoDraft !== 'boolean') throw fail(400, 'Réglage invalide.');
   if (b.simulate !== undefined && typeof b.simulate !== 'boolean') throw fail(400, 'Réglage invalide.');
+  if (b.publishMode !== undefined && !['brouillon', 'essai', 'automatique'].includes(b.publishMode)) throw fail(400, 'Mode de publication invalide.');
+  const wasAuto = store.getSettings().publishMode === 'automatique';
+  if (b.publishMode === 'automatique' && !wasAuto && b.confirmAutomatic !== true) {
+    throw fail(400, 'Pour activer la publication automatique, confirmez l\'avertissement : « Les articles seront publiés sans relecture. Laurent doit avoir donné son accord écrit. »', 'confirm_automatic');
+  }
+  const intIn = (v, lo, hi, label) => { if (v !== undefined && !(Number.isInteger(v) && v >= lo && v <= hi)) throw fail(400, `${label} : un nombre entier entre ${lo} et ${hi}.`); };
+  intIn(b.autoPublishDelayDays, 1, 30, 'Délai d\'attente (en jours)');
+  intIn(b.autoPublishMaxPerWeek, 1, 14, 'Articles publiés par semaine');
   let systemPrompt; // le modèle n'est PAS modifiable ici : il passe par POST /api/ai/model (test avant activation)
   if (b.systemPrompt !== undefined) {
     if (typeof b.systemPrompt !== 'string') throw fail(400, 'Consignes invalides.');
@@ -109,6 +118,14 @@ app.put('/api/settings', wrap((req, res) => {
   Object.assign(s, { frequency: freq, zone, brandName });
   if (typeof b.autoDraft === 'boolean') s.autoDraft = b.autoDraft;
   if (typeof b.simulate === 'boolean') s.simulate = b.simulate;
+  if (b.publishMode !== undefined) {
+    // Chaque activation du mode automatique ouvre une « période » : les anciens brouillons n'en font jamais partie.
+    if (b.publishMode === 'automatique' && !wasAuto) s.autoEpoch = crypto.randomUUID();
+    if (b.publishMode !== 'automatique') s.autoEpoch = '';
+    s.publishMode = b.publishMode;
+  }
+  if (b.autoPublishDelayDays !== undefined) s.autoPublishDelayDays = b.autoPublishDelayDays;
+  if (b.autoPublishMaxPerWeek !== undefined) s.autoPublishMaxPerWeek = b.autoPublishMaxPerWeek;
   if (systemPrompt !== undefined) s.systemPrompt = systemPrompt;
   store.saveSettings(s);
   res.json(publicSettings(s));
@@ -206,7 +223,17 @@ app.post('/api/category/ensure', wrap(async (req, res) => {
 // --- Articles ---
 const monthNow = () => new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7);
 const batch = { running: false, total: 0, done: 0, errors: [], notes: [] };
-const articleView = (a) => arts.view(a);
+// Ce que l'écran affiche de la publication automatique d'un article.
+function autoInfo(a, s) {
+  if (!a.autoScheduled || a.status === 'publie' || a.simulated) return null;
+  const active = s.publishMode === 'automatique' && !!a.autoEpoch && a.autoEpoch === s.autoEpoch && a.status === 'brouillon_wp';
+  return {
+    active, cancelled: !!a.autoCancelled, paused: !!s.publishPaused,
+    scheduledAt: a.wpSentAt ? publishing.scheduledAt(a, s).toISOString() : null,
+    blockers: active ? publishing.localReasons(a, s, new Date(8.64e15)).filter((r) => !/mode automatique|suspendues|période actuelle/.test(r)) : [],
+  };
+}
+const articleView = (a) => ({ ...arts.view(a), auto: autoInfo(a, store.getSettings()) });
 
 // Quota et sujets : on ne compte que les articles du mode en cours (démonstration ou réel),
 // pour que des articles de démonstration ne bloquent jamais le premier vrai lot.
@@ -234,7 +261,7 @@ const makeRecord = (topic, art, month) => {
   return {
     id: crypto.randomUUID(), topicId: topic.id || null, keyword: topic.keyword, city: topic.city || '', month,
     createdAt: new Date().toISOString(), status: 'a_relire', wpId: null, wpLink: null, simulated: isSimulated(),
-    essai: mode === 'essai', autoScheduled: mode === 'automatique', versionAt: new Date().toISOString(), versionLabel: 'Texte généré',
+    essai: mode === 'essai', autoScheduled: mode === 'automatique', autoEpoch: mode === 'automatique' ? store.getSettings().autoEpoch : '', versionAt: new Date().toISOString(), versionLabel: 'Texte généré',
     ...art,
   };
 };
@@ -259,13 +286,7 @@ async function liveHash(a) {
   try { return arts.hashContent(a.simulated || isSimulated() ? a.htmlContent : await wp.getContent(a.wpId)); } catch { return arts.hashContent(a.htmlContent); }
 }
 const wpReady = () => isSimulated() || wp.configured();
-// Enregistre UN article en relisant la liste à jour : un lot qui ajoute des articles pendant une longue opération
-// (régénération, envoi) ne peut ainsi jamais être écrasé.
-function saveArticle(a) {
-  const latest = store.getArticles();
-  const i = latest.findIndex((x) => x.id === a.id);
-  if (i >= 0) { latest[i] = a; store.saveArticles(latest); }
-}
+const saveArticle = store.saveArticle; // enregistre UN article sur la liste la plus récente (voir lib/store.js)
 const findArticle = (id) => {
   const list = store.getArticles();
   const a = list.find((x) => x.id === id);
@@ -514,16 +535,42 @@ app.post('/api/articles/:id/publish', wrap(async (req, res) => {
   assertSameMode(a, 'publier');
   if (a.siteDirty) throw fail(409, 'Vos dernières modifications ne sont pas encore envoyées sur le site. Ouvrez « Modifier » et enregistrez à nouveau pour réessayer.', 'site_dirty');
   confirmLength(a, req);
+  if (a.essai && !(req.body && req.body.confirmEssai === true)) throw fail(409, 'Cet article est marqué « essai ». Confirmez pour le publier quand même.', 'essai');
   // Garde-fou : on relit le texte réellement présent dans WordPress (il a pu être corrigé là-bas).
   if (!isSimulated()) {
     const live = await wp.getContent(a.wpId);
     if (live.includes('[SOURCE A VERIFIER]')) throw fail(409, 'Le texte contient encore « [SOURCE A VERIFIER] ». Remplacez ce marqueur par une vraie source (ou supprimez la phrase) dans WordPress, puis réessayez.');
   }
-  const r = await wp.publish(a.wpId);
-  Object.assign(a, { status: 'publie', wpLink: r.link || a.wpLink, publishedAt: new Date().toISOString() });
+  const r = await wp.publish(a.wpId, a.essai ? a.title : undefined); // un article « essai » perd son préfixe [ESSAI] en étant publié
+  Object.assign(a, { status: 'publie', wpLink: r.link || a.wpLink, publishedAt: new Date().toISOString(), publishedBy: 'manuel' });
+  saveArticle(a);
+  publishing.logPublication(a, 'manuel');
+  res.json(articleView(a));
+}));
+
+// ---------- Publication automatique ----------
+// « Tout arrêter » : suspend les publications automatiques tout de suite (la tâche relit ce réglage avant chaque publication).
+app.post('/api/publish/pause', wrap((req, res) => {
+  if (!req.body || typeof req.body.paused !== 'boolean') throw fail(400, 'Réglage invalide.');
+  const s = store.getSettings();
+  s.publishPaused = req.body.paused;
+  store.saveSettings(s);
+  log.warn(req.body.paused ? 'Publications automatiques SUSPENDUES (Tout arrêter)' : 'Publications automatiques reprises');
+  res.json(publicSettings(s));
+}));
+
+// Lance la vérification tout de suite (elle tourne aussi toutes les heures) : mêmes règles, rien de plus.
+app.post('/api/publish/auto/run', wrap(async (req, res) => res.json(await publishing.tick())));
+
+app.post('/api/articles/:id/cancel-auto', wrap((req, res) => {
+  const { a } = findArticle(req.params.id);
+  if (!a.autoScheduled || a.status === 'publie') throw fail(409, 'Cet article n\'a pas de publication automatique prévue.');
+  a.autoCancelled = !(req.body && req.body.cancelled === false);
   saveArticle(a);
   res.json(articleView(a));
 }));
+
+app.get('/api/publications', (req, res) => res.json(publishing.getLog().slice(-100).reverse()));
 
 app.delete('/api/articles/:id', wrap(async (req, res) => {
   const { list, a } = findArticle(req.params.id);
@@ -566,6 +613,8 @@ app.post('/api/audit/run', wrap((req, res) => {
 // --- Démarrage ---
 const port = Number(process.env.PORT) || 3000;
 if (require.main === module) {
+  // Publication automatique : vérification toutes les heures (sans effet tant que le mode automatique est désactivé).
+  cron.schedule('0 * * * *', () => { publishing.tick().catch((e) => log.error('Vérification des publications automatiques échouée', e)); }, { timezone: 'Europe/Paris' });
   // Tâche planifiée : lundi 8 h, Europe/Paris.
   cron.schedule('0 8 * * 1', () => { audit.runAudit('hebdomadaire').catch(() => {}); }, { timezone: 'Europe/Paris' });
   app.listen(port, () => log.info(`Tableau de bord CityLock sur le port ${port}${isSimulated() ? ' (MODE SIMULATION)' : ''}`));
