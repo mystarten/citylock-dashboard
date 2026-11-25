@@ -19,6 +19,8 @@ const log = require('../lib/log');
 const http = require('http');
 const server = require('../server');
 
+// Texte de n mots répartis en paragraphes (sans aucun mot interdit).
+const bodyWords = (n) => Array.from({ length: Math.ceil(n / 40) }, (_, i) => `<p>${Array.from({ length: Math.min(40, n - i * 40) }, (__, j) => `mot${i * 40 + j}`).join(' ')}</p>`).join('');
 const listen = (app) => new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
 
 test('audit complet sur un faux site', async () => {
@@ -124,7 +126,7 @@ test('API : auth, validation, lot simulé, brouillon, publication, suppression',
     assert.strictEqual(okSet.json.aiModel, 'anthropic/claude-haiku-5-5');
     assert.ok(okSet.json.systemPrompt.startsWith('Consigne personnalisée.'));
     const defs = (await call('GET', '/api/ai/defaults')).json;
-    assert.ok(defs.systemPrompt.includes('N\'invente JAMAIS') && defs.maxLength === 6000);
+    assert.ok(defs.systemPrompt.includes('N\'invente aucun chiffre') && defs.maxLength === 6000);
     // un texte identique à l'original n'est pas enregistré comme personnalisé
     assert.strictEqual((await call('PUT', '/api/settings', { ...base, systemPrompt: defs.systemPrompt })).json.systemPrompt, '');
     assert.strictEqual((await call('PUT', '/api/settings', { ...base, aiModel: '' })).json.aiModel, '');
@@ -178,7 +180,7 @@ test('OpenRouter : le modèle et les consignes des réglages sont bien utilisés
     await ai.generateArticle(topic, { brandName: 'CITYLOCK', zone: 'Chatou', aiModel: '', systemPrompt: '' });
     req = seen.pop();
     assert.strictEqual(req.j.model, 'env/modele');                                    // repli sur la variable du serveur
-    assert.ok(req.j.messages[0].content.includes('N\'invente JAMAIS'));               // consignes d'origine
+    assert.ok(req.j.messages[0].content.includes('N\'invente aucun chiffre'));               // consignes d'origine
 
     assert.deepStrictEqual(await ai.testModel({ aiModel: '' }), { ok: true, model: 'env/modele' });
     await assert.rejects(() => ai.testModel({ aiModel: 'mauvais/modele' }), /code 400.*Vérifiez l'identifiant du modèle/);
@@ -299,7 +301,8 @@ test('sujets pris en compte, lot réel, essai, publication réelle et garde-fous
     let body = ''; req.on('data', (c) => { body += c; });
     req.on('end', () => {
       const j = JSON.parse(body); orReqs.push(j);
-      const art = { title: 'Titre ' + orReqs.length, metaTitle: 'M', metaDescription: 'D', slug: 'titre-' + orReqs.length, htmlContent: '<p>texte</p><p>Selon le secteur, [SOURCE A VERIFIER] des cambriolages.</p>', internalLinkSuggestions: [], faitsAVerifier: ['stat'] };
+      const short = /Mot-clé principal : article court/.test(j.messages[1].content);
+      const art = { title: 'Titre ' + orReqs.length, metaTitle: 'M', metaDescription: 'D', slug: 'titre-' + orReqs.length, htmlContent: (short ? '<p>texte très court</p>' : bodyWords(650)) + '<p>Selon le secteur, [SOURCE A VERIFIER] des cambriolages.</p>', internalLinkSuggestions: [], faitsAVerifier: ['stat'] };
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(art) } }] }));
     });
@@ -355,7 +358,7 @@ test('sujets pris en compte, lot réel, essai, publication réelle et garde-fous
     const trial = await call('POST', '/api/articles/test', { keyword: 'serrure connectée', city: 'Sartrouville' });
     assert.strictEqual(trial.status, 200);
     assert.ok(trial.json.sent.user.includes('Mot-clé principal : serrure connectée') && trial.json.sent.user.includes('Ville ciblée : Sartrouville'));
-    assert.ok(trial.json.sent.system.includes('N\'invente JAMAIS') && trial.json.sent.system.includes('FORMAT DE REPONSE'));
+    assert.ok(trial.json.sent.system.includes('N\'invente aucun chiffre') && trial.json.sent.system.includes('FORMAT DE REPONSE'));
     assert.strictEqual(trial.json.sent.model, 'anthropic/claude-haiku-5-5');
     assert.strictEqual(fake.wpPosts.size, postsBefore);
     assert.strictEqual((await call('GET', '/api/articles')).json.length, list.length);
@@ -367,6 +370,19 @@ test('sujets pris en compte, lot réel, essai, publication réelle et garde-fous
     const kept = await call('POST', '/api/articles/test/keep', { trialId: topicTrial.json.trialId });
     assert.strictEqual(kept.json.article.status, 'brouillon_wp');
     assert.strictEqual((await call('POST', '/api/articles/test/keep', { trialId: topicTrial.json.trialId })).status, 404);
+    // longueur : un article hors de 600 à 900 mots n'est PAS envoyé automatiquement, et l'envoi manuel exige une confirmation
+    const shortTrial = await call('POST', '/api/articles/test', { keyword: 'article court' });
+    assert.ok(shortTrial.json.check.words < 600 && shortTrial.json.check.inRange === false);
+    assert.ok(shortTrial.json.check.issues.some((i) => i.code === 'length'));
+    const postsBeforeShort = fake.wpPosts.size;
+    const shortKept = await call('POST', '/api/articles/test/keep', { trialId: shortTrial.json.trialId });
+    assert.deepStrictEqual([shortKept.json.article.status, shortKept.json.autoDraftSkipped, fake.wpPosts.size], ['a_relire', 'length', postsBeforeShort]);
+    const sendNo = await call('POST', `/api/articles/${shortKept.json.article.id}/send`);
+    assert.deepStrictEqual([sendNo.status, sendNo.json.code, fake.wpPosts.size], [409, 'out_of_range', postsBeforeShort]);
+    assert.strictEqual((await call('POST', `/api/articles/${shortKept.json.article.id}/send`, { confirmOutOfRange: true })).status, 200);
+    assert.strictEqual(fake.wpPosts.size, postsBeforeShort + 1);
+    await call('DELETE', `/api/articles/${shortKept.json.article.id}`);
+
     // limites : cadence et plafond journalier
     process.env.TRIAL_COOLDOWN_MS = '60000';
     assert.strictEqual((await call('POST', '/api/articles/test', { keyword: 'x' })).status, 429);

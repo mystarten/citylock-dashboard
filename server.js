@@ -12,6 +12,8 @@ const wp = require('./lib/wp');
 const audit = require('./lib/audit');
 const secrets = require('./lib/secrets');
 const { isSimulated } = require('./lib/config');
+const rules = require('./lib/rules');
+const arts = require('./lib/articles');
 
 // --- Configuration obligatoire ---
 if (!process.env.DASHBOARD_USER || !process.env.DASHBOARD_PASSWORD || !process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 16) {
@@ -44,9 +46,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const wrap = (fn) => (req, res) => Promise.resolve().then(() => fn(req, res)).catch((e) => {
   log.error(`${req.method} ${req.path}`, e);
-  res.status(e.httpStatus || 500).json({ error: e.httpStatus ? e.message : (e.message || 'Erreur interne.') });
+  res.status(e.httpStatus || 500).json({ error: e.httpStatus ? e.message : (e.message || 'Erreur interne.'), ...(e.code ? { code: e.code } : {}) });
 });
-const fail = (status, message) => Object.assign(new Error(message), { httpStatus: status });
+const fail = (status, message, code) => Object.assign(new Error(message), { httpStatus: status, ...(code ? { code } : {}) });
 
 // --- Session ---
 app.get('/api/session', (req, res) => res.json({ authenticated: auth.isAuthenticated(req), simulate: isSimulated() }));
@@ -181,8 +183,8 @@ app.post('/api/category/ensure', wrap(async (req, res) => {
 
 // --- Articles ---
 const monthNow = () => new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7);
-const batch = { running: false, total: 0, done: 0, errors: [] };
-const articleView = (a) => a;
+const batch = { running: false, total: 0, done: 0, errors: [], notes: [] };
+const articleView = (a) => arts.view(a);
 
 // Quota et sujets : on ne compte que les articles du mode en cours (démonstration ou réel),
 // pour que des articles de démonstration ne bloquent jamais le premier vrai lot.
@@ -205,16 +207,34 @@ function assertSameMode(a, action) {
   if (!!a.simulated !== isSimulated()) throw fail(409, `Cet article a été créé en mode ${modeName(!!a.simulated)}. Repassez en mode ${modeName(!!a.simulated)} (Réglages, Connexions) pour le ${action}, ou supprimez-le.`);
 }
 const lastAuditPages = () => { const a = store.getAudits(); const l = a[a.length - 1]; return l && l.sitemapUrls ? l.sitemapUrls.slice(0, 40) : []; };
-const makeRecord = (topic, art, month) => ({
-  id: crypto.randomUUID(), topicId: topic.id || null, keyword: topic.keyword, city: topic.city || '', month,
-  createdAt: new Date().toISOString(), status: 'a_relire', wpId: null, wpLink: null, simulated: isSimulated(), ...art,
-});
+const makeRecord = (topic, art, month) => {
+  const mode = store.getSettings().publishMode;
+  return {
+    id: crypto.randomUUID(), topicId: topic.id || null, keyword: topic.keyword, city: topic.city || '', month,
+    createdAt: new Date().toISOString(), status: 'a_relire', wpId: null, wpLink: null, simulated: isSimulated(),
+    essai: mode === 'essai', autoScheduled: mode === 'automatique', versionAt: new Date().toISOString(), versionLabel: 'Texte généré',
+    ...art,
+  };
+};
+// L'envoi automatique en brouillon est toujours actif en mode automatique (on ne publie que ce qui est déjà sur le site).
+const sendsAutomatically = (s) => s.autoDraft || s.publishMode === 'automatique';
+const confirmLength = (a, req) => {
+  const c = rules.checkArticle(a);
+  if (!c.inRange && !(req.body && req.body.confirmOutOfRange === true)) {
+    throw fail(409, `Cet article compte ${c.words} mots (attendu ${rules.MIN_WORDS} à ${rules.MAX_WORDS}). Confirmez pour continuer quand même, ou régénérez-le.`, 'out_of_range');
+  }
+};
 async function pushDraft(a) {
   const s = store.getSettings();
   let cat = s.blogCategoryId;
   if (!cat) { cat = await wp.ensureBlogCategory(); s.blogCategoryId = cat; store.saveSettings(s); }
   const post = await wp.createDraft(a, cat);
-  Object.assign(a, { status: 'brouillon_wp', wpId: post.id, wpLink: post.link });
+  Object.assign(a, { status: 'brouillon_wp', wpId: post.id, wpLink: post.link, wpSentAt: new Date().toISOString(), siteDirty: false });
+  a.wpSyncHash = await liveHash(a);
+}
+// Empreinte du texte tel que WordPress l'a enregistré (au besoin celle de notre texte).
+async function liveHash(a) {
+  try { return arts.hashContent(a.simulated || isSimulated() ? a.htmlContent : await wp.getContent(a.wpId)); } catch { return arts.hashContent(a.htmlContent); }
 }
 const wpReady = () => isSimulated() || wp.configured();
 const findArticle = (id) => {
@@ -248,7 +268,7 @@ app.post('/api/articles/batch', wrap((req, res) => {
     if (!ai.effectiveModel(s)) throw fail(400, 'Aucun modèle OpenRouter choisi. Indiquez-en un dans Réglages, Rédaction automatique.');
   }
 
-  Object.assign(batch, { running: true, total: todo.length, done: 0, errors: [] });
+  Object.assign(batch, { running: true, total: todo.length, done: 0, errors: [], notes: [] });
   res.status(202).json({ started: todo.length });
 
   (async () => {
@@ -257,7 +277,11 @@ app.post('/api/articles/batch', wrap((req, res) => {
       try {
         const art = await ai.generateArticle(topic, s, pages);
         const rec = makeRecord(topic, art, month);
-        if (s.autoDraft && wpReady()) {
+        const chk = rules.checkArticle(rec);
+        if (sendsAutomatically(s) && wpReady() && !chk.inRange) {
+          rec.autoDraftSkipped = 'length';
+          batch.notes.push(`« ${topic.keyword} » : ${chk.words} mots (attendu ${rules.MIN_WORDS} à ${rules.MAX_WORDS}). Il n'a pas été envoyé sur le site : régénérez-le ou confirmez l'envoi.`);
+        } else if (sendsAutomatically(s) && wpReady()) {
           try { await pushDraft(rec); } catch (e) {
             log.error(`Envoi automatique en brouillon échoué pour « ${topic.keyword} »`, e);
             batch.errors.push(`${topic.keyword} : rédigé, mais l'envoi dans WordPress a échoué (${e.message}). Vous pouvez le renvoyer à la main.`);
@@ -277,6 +301,9 @@ app.post('/api/articles/batch', wrap((req, res) => {
 }));
 
 app.get('/api/articles/batch/status', (req, res) => res.json(batch));
+
+// Doit rester APRÈS les routes fixes (/plan, /batch/status, /test...) : « :id » intercepterait leur nom.
+app.get('/api/articles/:id', wrap((req, res) => res.json(articleView(findArticle(req.params.id).a))));
 
 // Essai de rédaction : un article « pour voir », sans envoi à WordPress ni utilisation du quota,
 // tant qu'on ne clique pas sur « Garder ». Limité : 1 essai toutes les 3 secondes, 10 par jour.
@@ -314,7 +341,7 @@ app.post('/api/articles/test', wrap(async (req, res) => {
   const sent = ai.previewPrompt(topic, s, pages);
   const article = await ai.generateArticle(topic, s, pages);
   pendingTrial = { id: crypto.randomUUID(), topic, article, simulated: isSimulated() };
-  res.json({ trialId: pendingTrial.id, topic, article, simulated: pendingTrial.simulated, sent, trialsLeft: trialsPerDay() - trialCount.n });
+  res.json({ trialId: pendingTrial.id, topic, article, check: rules.checkArticle(article), simulated: pendingTrial.simulated, sent, trialsLeft: trialsPerDay() - trialCount.n });
 }));
 
 app.post('/api/articles/test/keep', wrap(async (req, res) => {
@@ -324,23 +351,26 @@ app.post('/api/articles/test/keep', wrap(async (req, res) => {
   const s = store.getSettings();
   const rec = makeRecord(t.topic, t.article, monthNow());
   let autoDraftError = '';
-  if (s.autoDraft && wpReady()) {
+  const chk = rules.checkArticle(rec);
+  if (sendsAutomatically(s) && wpReady() && !chk.inRange) rec.autoDraftSkipped = 'length';
+  else if (sendsAutomatically(s) && wpReady()) {
     try { await pushDraft(rec); } catch (e) { log.error('Envoi automatique de l\'essai échoué', e); autoDraftError = e.message; }
   }
   const list = store.getArticles();
   list.push(rec);
   store.saveArticles(list);
   pendingTrial = null;
-  res.json({ article: rec, autoDraftError });
+  res.json({ article: articleView(rec), autoDraftError, autoDraftSkipped: rec.autoDraftSkipped || '' });
 }));
 
 app.post('/api/articles/:id/send', wrap(async (req, res) => {
   const { list, a } = findArticle(req.params.id);
   if (a.status !== 'a_relire') throw fail(409, 'Cet article a déjà été envoyé à WordPress.');
   assertSameMode(a, 'envoyer');
+  confirmLength(a, req);
   await pushDraft(a);
   store.saveArticles(list);
-  res.json(a);
+  res.json(articleView(a));
 }));
 
 app.post('/api/articles/:id/publish', wrap(async (req, res) => {
@@ -348,6 +378,7 @@ app.post('/api/articles/:id/publish', wrap(async (req, res) => {
   if (!req.body || req.body.validated !== true) throw fail(400, 'Vous devez confirmer « J\'ai relu et validé ».');
   if (a.status !== 'brouillon_wp') throw fail(409, 'Envoyez d\'abord l\'article en brouillon WordPress.');
   assertSameMode(a, 'publier');
+  confirmLength(a, req);
   // Garde-fou : on relit le texte réellement présent dans WordPress (il a pu être corrigé là-bas).
   if (!isSimulated()) {
     const live = await wp.getContent(a.wpId);
@@ -356,7 +387,7 @@ app.post('/api/articles/:id/publish', wrap(async (req, res) => {
   const r = await wp.publish(a.wpId);
   Object.assign(a, { status: 'publie', wpLink: r.link || a.wpLink, publishedAt: new Date().toISOString() });
   store.saveArticles(list);
-  res.json(a);
+  res.json(articleView(a));
 }));
 
 app.delete('/api/articles/:id', wrap(async (req, res) => {
