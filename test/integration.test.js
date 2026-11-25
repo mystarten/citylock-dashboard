@@ -117,19 +117,17 @@ test('API : auth, validation, lot simulé, brouillon, publication, suppression',
 
     // Modèle et consignes modifiables depuis les réglages
     const base = { frequency: 2, zone: 'Chatou, Yvelines', brandName: 'CITYLOCK', autoDraft: true };
-    assert.strictEqual((await call('PUT', '/api/settings', { ...base, aiModel: 'modele avec espace' })).status, 400);
-    assert.strictEqual((await call('PUT', '/api/settings', { ...base, aiModel: 42 })).status, 400);
+    // le modèle ne peut PAS être changé par la sauvegarde des réglages : il faut passer par le test d'activation
+    assert.strictEqual((await call('PUT', '/api/settings', { ...base, aiModel: 'pirate/modele-non-teste' })).json.aiModel, '');
     assert.strictEqual((await call('PUT', '/api/settings', { ...base, systemPrompt: 'court' })).status, 400);
     assert.strictEqual((await call('PUT', '/api/settings', { ...base, systemPrompt: 'x'.repeat(6001) })).status, 400);
-    const okSet = await call('PUT', '/api/settings', { ...base, aiModel: ' anthropic/claude-haiku-5-5 ', systemPrompt: 'Consigne personnalisée. '.repeat(10) });
+    const okSet = await call('PUT', '/api/settings', { ...base, systemPrompt: 'Consigne personnalisée. '.repeat(10) });
     assert.strictEqual(okSet.status, 200);
-    assert.strictEqual(okSet.json.aiModel, 'anthropic/claude-haiku-5-5');
     assert.ok(okSet.json.systemPrompt.startsWith('Consigne personnalisée.'));
     const defs = (await call('GET', '/api/ai/defaults')).json;
     assert.ok(defs.systemPrompt.includes('N\'invente aucun chiffre') && defs.maxLength === 6000);
     // un texte identique à l'original n'est pas enregistré comme personnalisé
     assert.strictEqual((await call('PUT', '/api/settings', { ...base, systemPrompt: defs.systemPrompt })).json.systemPrompt, '');
-    assert.strictEqual((await call('PUT', '/api/settings', { ...base, aiModel: '' })).json.aiModel, '');
     assert.strictEqual((await call('GET', '/api/settings')).json.frequency, 2); // les champs absents ne sont pas écrasés
 
     // Envoi automatique en brouillon : le nouvel article arrive directement au statut brouillon WordPress

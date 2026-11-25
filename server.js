@@ -97,12 +97,7 @@ app.put('/api/settings', wrap((req, res) => {
   if (!zone || !brandName) throw fail(400, 'La zone desservie et le nom commercial sont obligatoires.');
   if (b.autoDraft !== undefined && typeof b.autoDraft !== 'boolean') throw fail(400, 'Réglage invalide.');
   if (b.simulate !== undefined && typeof b.simulate !== 'boolean') throw fail(400, 'Réglage invalide.');
-  let aiModel, systemPrompt;
-  if (b.aiModel !== undefined) {
-    if (typeof b.aiModel !== 'string') throw fail(400, 'Modèle invalide.');
-    aiModel = b.aiModel.trim();
-    if (aiModel && !ai.MODEL_PATTERN.test(aiModel)) throw fail(400, 'Identifiant de modèle invalide. Copiez-le tel quel depuis openrouter.ai/models (exemple : anthropic/claude-haiku-5-5), sans espace.');
-  }
+  let systemPrompt; // le modèle n'est PAS modifiable ici : il passe par POST /api/ai/model (test avant activation)
   if (b.systemPrompt !== undefined) {
     if (typeof b.systemPrompt !== 'string') throw fail(400, 'Consignes invalides.');
     systemPrompt = b.systemPrompt.replace(/\r\n/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
@@ -114,7 +109,6 @@ app.put('/api/settings', wrap((req, res) => {
   Object.assign(s, { frequency: freq, zone, brandName });
   if (typeof b.autoDraft === 'boolean') s.autoDraft = b.autoDraft;
   if (typeof b.simulate === 'boolean') s.simulate = b.simulate;
-  if (aiModel !== undefined) s.aiModel = aiModel;
   if (systemPrompt !== undefined) s.systemPrompt = systemPrompt;
   store.saveSettings(s);
   res.json(publicSettings(s));
@@ -162,13 +156,41 @@ app.put('/api/secrets', wrap((req, res) => {
   res.json(publicSettings());
 }));
 
-app.get('/api/ai/defaults', (req, res) => res.json({ systemPrompt: ai.DEFAULT_RULES, maxLength: ai.MAX_RULES_LENGTH, envModel: process.env.OPENROUTER_MODEL || '' }));
+app.get('/api/ai/defaults', (req, res) => {
+  const set = store.getSettings();
+  res.json({ systemPrompt: ai.DEFAULT_RULES, maxLength: ai.MAX_RULES_LENGTH, envModel: process.env.OPENROUTER_MODEL || '', activeModel: ai.effectiveModel(set), previousModel: set.aiModelPrevious || '' });
+});
 
 let lastAiTest = 0;
+const aiCooldown = () => { if (Date.now() - lastAiTest < 2000) throw fail(429, 'Patientez quelques secondes avant de retester.'); lastAiTest = Date.now(); };
+
 app.post('/api/ai/test', wrap(async (req, res) => {
-  if (Date.now() - lastAiTest < 2000) throw fail(429, 'Patientez quelques secondes avant de retester.');
-  lastAiTest = Date.now();
+  aiCooldown();
   res.json(await ai.testModel(store.getSettings()));
+}));
+
+// Changer de modèle : on le TESTE d'abord, et on ne l'active que si le test réussit.
+// En cas d'échec, le modèle actuel est conservé (l'application ne reste jamais sans modèle).
+app.post('/api/ai/model', wrap(async (req, res) => {
+  const b = req.body || {};
+  if (typeof b.model !== 'string') throw fail(400, 'Modèle invalide.');
+  const candidate = b.model.trim();
+  if (candidate && !ai.MODEL_PATTERN.test(candidate)) throw fail(400, 'Identifiant de modèle invalide. Copiez-le tel quel depuis openrouter.ai/models (exemple : anthropic/claude-haiku-5-5), sans espace.');
+  const s = store.getSettings();
+  const current = ai.effectiveModel(s);
+  if (isSimulated()) {
+    return res.json({ ok: false, simulated: true, active: current, message: 'Mode démonstration : aucun test réel n\'est fait, le modèle n\'a pas été changé. Désactivez le mode démonstration (Réglages, Connexions) pour tester et activer un modèle.' });
+  }
+  aiCooldown();
+  let tested;
+  try { tested = await ai.testModel(s, candidate); } catch (e) {
+    const reason = e.simple || e.message;
+    log.warn(`Test du modèle « ${candidate || '(modèle du serveur)'} » échoué : ${reason}`);
+    return res.json({ ok: false, active: current, reason, message: `Ce modèle n'a pas répondu : ${reason}. Le modèle actuel est conservé : ${current || 'aucun'}.` });
+  }
+  if (candidate !== (s.aiModel || '')) { s.aiModelPrevious = s.aiModel || ''; s.aiModel = candidate; store.saveSettings(s); }
+  log.info(`Modèle activé : ${tested.model}`);
+  res.json({ ok: true, model: tested.model, active: tested.model, message: `Modèle activé : ${tested.model}` });
 }));
 
 app.get('/api/wp/test', wrap(async (req, res) => res.json(await wp.testConnection())));
