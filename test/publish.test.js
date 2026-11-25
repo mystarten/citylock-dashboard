@@ -61,8 +61,8 @@ test('publication automatique : chaque condition manquante empêche la publicati
     await enableAuto(call);
     const cases = [
       ['des faits restent à vérifier', { faitsAVerifier: ['Une statistique'] }, /fait/],
-      ['texte trop court (599 mots)', { htmlContent: bodyWords(599) }, /Longueur hors consigne/],
-      ['texte trop long (901 mots)', { htmlContent: bodyWords(901) }, /Longueur hors consigne/],
+      ['texte trop court (599 mots)', { htmlContent: bodyWords(599) }, /Longueur hors de la plage demandée/],
+      ['texte trop long (901 mots)', { htmlContent: bodyWords(901) }, /Longueur hors de la plage demandée/],
       ['mot interdit', { htmlContent: bodyWords(650) + '<p>Une alarme garantie.</p>' }, /interdit/],
       ['marqueur de source', { htmlContent: bodyWords(650) + '<p>Chiffre [SOURCE A VERIFIER].</p>' }, /marqueur/],
       ['article marqué essai', { essai: true }, /essai/],

@@ -108,10 +108,10 @@ app.put('/api/settings', wrap((req, res) => {
   intIn(b.autoPublishMaxPerWeek, 1, 14, 'Articles publiés par semaine');
   let systemPrompt; // le modèle n'est PAS modifiable ici : il passe par POST /api/ai/model (test avant activation)
   if (b.systemPrompt !== undefined) {
-    if (typeof b.systemPrompt !== 'string') throw fail(400, 'Consignes invalides.');
+    if (typeof b.systemPrompt !== 'string') throw fail(400, 'Instructions invalides.');
     systemPrompt = b.systemPrompt.replace(/\r\n/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
-    if (systemPrompt.length > ai.MAX_RULES_LENGTH) throw fail(400, `Les consignes sont trop longues (maximum ${ai.MAX_RULES_LENGTH} caractères).`);
-    if (systemPrompt && systemPrompt.length < 80) throw fail(400, 'Les consignes sont trop courtes pour être utiles. Videz le champ pour revenir au texte d\'origine.');
+    if (systemPrompt.length > ai.MAX_RULES_LENGTH) throw fail(400, `Les instructions sont trop longues (maximum ${ai.MAX_RULES_LENGTH} caractères).`);
+    if (systemPrompt && systemPrompt.length < 80) throw fail(400, 'Les instructions sont trop courtes pour être utiles. Videz le champ pour revenir au texte d\'origine.');
     if (systemPrompt === ai.DEFAULT_RULES.trim()) systemPrompt = ''; // identique à l'original : on n'enregistre rien
   }
   const s = store.getSettings();
