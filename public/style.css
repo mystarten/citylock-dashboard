@@ -299,3 +299,20 @@ input[type=number]:focus { border-color: var(--accent); outline: 3px solid var(-
 .sched { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 14px; }
 .sched h3 { margin-bottom: 8px; }
 .sched .row input { flex: 1 1 140px; }
+
+/* Calendrier de publication et contrôle SEO */
+.cal { display: flex; flex-direction: column; gap: 8px; margin: 14px 0; }
+.cal-row { display: grid; grid-template-columns: minmax(0, 1fr) 170px auto; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.cal-row input { width: 100%; }
+.cal-row .linkish { text-align: left; background: none; border: 0; padding: 0; font: inherit; color: var(--text); cursor: pointer; overflow-wrap: anywhere; }
+.cal-row .linkish:hover b { text-decoration: underline; }
+@media (max-width: 720px) { .cal-row { grid-template-columns: 1fr; } }
+.seo-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.seo-list li { display: flex; gap: 10px; align-items: flex-start; }
+.seo-dot { flex: none; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-top: 1px; }
+.seo-dot .ic { width: 14px; height: 14px; }
+.seo-list li.ok .seo-dot { background: var(--ok-soft); color: var(--ok); }
+.seo-list li.ko .seo-dot { background: var(--ko-soft); color: var(--ko); }
+.seo-list li.ko .seo-val { color: var(--ko); font-weight: 700; }
+.seo-miss { color: var(--ko); font-weight: 700; }
+.seo-val { overflow-wrap: anywhere; }

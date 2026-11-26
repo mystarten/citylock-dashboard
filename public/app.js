@@ -95,6 +95,14 @@
   const navActive = (id) => S.view === id || (id === 'articles' && (S.view === 'article' || S.view === 'edit'));
   const fmtDateTime = (iso) => new Date(iso).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
   const fmtDay = (ymd) => new Date(ymd + 'T12:00:00Z').toLocaleDateString('fr-FR', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
+  // Premier jour proposé : aujourd'hui, sauf s'il est trop tard pour une publication à 10 h (alors demain).
+  const defaultStart = () => {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(now);
+    const min = Number(parts.find((p) => p.type === 'hour').value) * 60 + Number(parts.find((p) => p.type === 'minute').value);
+    const day = new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris' }).format(now);
+    return min < 9 * 60 + 50 ? day : plusDays(day, 1);
+  };
   const todayParis = () => new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris' }).format(new Date());
   const plusDays = (ymd, n) => { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
   const modelTag = (m) => el('span', { class: 'model-tag' }, 'Rédigé avec : ', el('b', {}, m === 'démonstration' ? 'texte de démonstration (aucune IA)' : (m || 'modèle non enregistré')));
@@ -264,7 +272,7 @@
 
   function writeMany() {
     const s = S.settings, b = S.batch;
-    const P = S.many || (S.many = { months: 3, perMonth: 2, startDate: plusDays(todayParis(), 7), items: null, err: '' });
+    const P = S.many || (S.many = { count: 4, spacing: 7, startDate: defaultStart(), items: null, err: '' });
     const out = [];
     if (b.running) {
       out.push(el('div', { class: 'card' }, el('h2', {}, 'Rédaction en cours...'),
@@ -278,20 +286,20 @@
       el('p', { class: 'muted' }, 'Les articles sont des brouillons ici, avec leur date prévue. Rien n\'est encore sur le site.'),
       el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: () => go('articles') }, 'Relire et programmer'))));
 
-    const months = el('select', { id: 'm-months', 'aria-label': 'Nombre de mois' }, [1, 2, 3, 4, 5, 6].map((n) => el('option', { value: n }, n + (n > 1 ? ' mois' : ' mois'))));
-    const per = el('select', { id: 'm-per', 'aria-label': 'Articles par mois' }, [1, 2, 3].map((n) => el('option', { value: n }, n + (n > 1 ? ' articles par mois' : ' article par mois'))));
+    const count = el('input', { type: 'number', id: 'm-count', min: 1, max: 20, step: 1 });
+    const gap = el('select', { id: 'm-gap', 'aria-label': 'Écart entre deux articles' }, [[0, 'le même jour'], [1, 'tous les jours'], [3, 'tous les 3 jours'], [7, 'toutes les semaines'], [14, 'tous les 15 jours'], [30, 'tous les mois']].map(([v, l]) => el('option', { value: v }, l)));
     const start = el('input', { type: 'date', id: 'm-start', min: todayParis() });
-    months.value = P.months; per.value = P.perMonth; start.value = P.startDate;
-    const sync = () => { P.months = Number(months.value); P.perMonth = Number(per.value); P.startDate = start.value; };
-    [months, per, start].forEach((n) => n.addEventListener('change', sync));
+    count.value = P.count; gap.value = P.spacing; start.value = P.startDate;
+    const sync = () => { P.count = Number(count.value); P.spacing = Number(gap.value); P.startDate = start.value; };
+    [count, gap, start].forEach((n) => n.addEventListener('change', sync));
     const prepare = el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => {
       sync(); P.err = '';
-      try { const r = await api('/write/plan', 'POST', { months: P.months, perMonth: P.perMonth, startDate: P.startDate }); P.items = r.items; P.missing = r.missing; } catch (e) { P.err = e.message; P.items = null; }
+      try { const r = await api('/write/plan', 'POST', { count: P.count, spacingDays: P.spacing, startDate: P.startDate }); P.items = r.items; P.missing = r.missing; } catch (e) { P.err = e.message; P.items = null; }
       render();
-    }) }, 'Préparer le planning');
+    }) }, 'Préparer la liste');
     out.push(el('div', { class: 'card' }, el('h2', {}, 'Plusieurs articles d\'un coup'),
-      el('p', { class: 'muted' }, 'De 1 à 6 mois, avec 1 à 3 articles par mois. L\'outil propose un sujet et une date par article (vos sujets, dans l\'ordre). Vous pouvez tout modifier avant de lancer la rédaction.'),
-      el('div', { class: 'row' }, el('div', { class: 'grow-field' }, el('label', { for: 'm-months' }, 'Durée'), months), el('div', { class: 'grow-field' }, el('label', { for: 'm-per' }, 'Rythme'), per), el('div', { class: 'grow-field' }, el('label', { for: 'm-start' }, 'Premier article le'), start)),
+      el('p', { class: 'muted' }, 'Choisissez combien d\'articles vous voulez (de 1 à 20). Vous indiquez ensuite le mot-clé de chacun, puis une date proposée que vous pourrez changer. Les articles sont rédigés, rangés dans « Articles », et vous les programmez à 10 h le jour choisi.'),
+      el('div', { class: 'row' }, el('div', { class: 'grow-field' }, el('label', { for: 'm-count' }, 'Nombre d\'articles'), count), el('div', { class: 'grow-field' }, el('label', { for: 'm-start' }, 'Premier article le'), start), el('div', { class: 'grow-field' }, el('label', { for: 'm-gap' }, 'Ensuite'), gap)),
       el('div', { class: 'row btn-row' }, prepare),
       P.err ? el('div', { class: 'alert mt' }, P.err) : null));
 
@@ -303,9 +311,9 @@
         date.addEventListener('input', () => { it.plannedDate = date.value; }); kw.addEventListener('input', () => { it.keyword = kw.value; it.topicId = null; }); city.addEventListener('input', () => { it.city = city.value; });
         return el('div', { class: 'plan-row' }, el('span', { class: 'plan-n' }, i + 1), date, kw, city);
       });
-      out.push(el('div', { class: 'card' }, el('h2', {}, `Le planning : ${P.items.length} ${plural(P.items.length, 'article', 'articles')}`),
-        P.missing ? el('div', { class: 'alert' }, `Vous avez ${s.topics.length} ${plural(s.topics.length, 'sujet enregistré', 'sujets enregistrés')} pour ${P.items.length} articles : complétez les ${P.missing} ligne${P.missing > 1 ? 's' : ''} vide${P.missing > 1 ? 's' : ''} ci-dessous (deux articles sur le même mot-clé se font concurrence sur Google : variez-les).`) : null,
-        el('p', { class: 'muted small' }, 'Date de publication prévue, mot-clé, ville. Les articles sont publiés à 9 h (heure de Paris) le jour choisi, une fois programmés.'),
+      out.push(el('div', { class: 'card' }, el('h2', {}, `Vos ${P.items.length} ${plural(P.items.length, 'article', 'articles')}`),
+        P.missing ? el('div', { class: 'alert' }, `Écrivez le mot-clé de chaque ligne vide (${P.missing} ${plural(P.missing, 'ligne', 'lignes')}). Les mots-clés de votre liste de sujets sont déjà remplis. Deux articles sur le même mot-clé se font concurrence sur Google : variez-les.`) : null,
+        el('p', { class: 'muted small' }, 'Date de publication prévue, mot-clé, ville. Une fois programmés, les articles sont publiés à 10 h (heure de Paris) le jour choisi.'),
         el('div', { class: 'plan' }, rows),
         el('div', { class: 'row btn-row' },
           el('button', { class: 'btn primary big', type: 'button', onclick: safe(async () => {
@@ -345,13 +353,28 @@
   function viewArticles() {
     const demoCount = S.articles.filter((a) => a.simulated).length;
     const m = mine();
-    const planned = m.filter((a) => a.plannedDate && ['a_relire', 'brouillon_wp'].includes(a.status));
     const out = [head('Articles', 'Tout ce qui est rédigé : à relire, programmé ou publié.', el('button', { class: 'btn primary big', type: 'button', onclick: () => go('write') }, icon('spark'), 'Rédiger'))];
 
-    if (planned.length) {
-      out.push(el('div', { class: 'card' }, el('h2', {}, `${planned.length} ${plural(planned.length, 'article a', 'articles ont')} une date prévue`),
-        el('p', { class: 'muted' }, 'Relisez-les (et corrigez à la main si besoin), puis programmez-les : WordPress les publiera tout seul à la date prévue, à 9 h. Un article avec un problème de longueur, un mot interdit ou une source à compléter est laissé de côté, avec la raison.'),
-        el('div', { class: 'actions' }, el('button', { class: 'btn primary big', type: 'button', onclick: safe(scheduleAll) }, icon('send'), 'Programmer tous les articles prêts'))));
+    const waiting = m.filter((a) => ['a_relire', 'brouillon_wp'].includes(a.status));
+    if (waiting.length) {
+      const rows = [...waiting].sort((x, y) => (x.plannedDate || '9999').localeCompare(y.plannedDate || '9999')).map((a) => {
+        const d = el('input', { type: 'date', min: todayParis(), 'aria-label': 'Date de publication de ' + a.title });
+        d.value = a.plannedDate || '';
+        d.addEventListener('change', safe(async () => { await api(`/articles/${a.id}/planned`, 'PUT', { plannedDate: d.value }); await refresh(); render(); }));
+        return el('div', { class: 'cal-row' },
+          el('button', { class: 'linkish', type: 'button', onclick: () => go('article', a.id) }, el('b', {}, a.title), el('span', { class: 'muted small' }, ` ${a.keyword} · ${a.check.words} mots`)),
+          d,
+          el('button', { class: 'btn', type: 'button', disabled: !a.plannedDate, onclick: safe(async () => {
+            const r = await confirmed(`/articles/${a.id}/schedule`, { date: d.value });
+            if (r) { toast('Programmé : ' + fmtDateTime(r.scheduledAt) + '.'); await refresh(); render(); }
+          }) }, 'Programmer à 10 h'));
+      });
+      const ready = waiting.filter((a) => a.plannedDate).length;
+      out.push(el('div', { class: 'card' }, el('h2', {}, 'Calendrier de publication'),
+        el('p', { class: 'muted' }, 'Choisissez la date de chaque article (cliquez sur le champ pour ouvrir le calendrier). À 10 h le jour choisi, WordPress le publie tout seul. Vous pouvez programmer un par un, ou tous ceux qui ont une date.'),
+        el('div', { class: 'cal' }, rows),
+        el('div', { class: 'actions' }, el('button', { class: 'btn primary big', type: 'button', disabled: !ready, onclick: safe(scheduleAll) }, icon('send'), `Programmer les ${ready} articles datés`)),
+        el('p', { class: 'muted small' }, 'Un article avec un problème de longueur, un mot interdit ou une source à compléter est laissé de côté, avec la raison.')));
     }
     if (S.scheduleReport) {
       const r = S.scheduleReport;
@@ -383,7 +406,7 @@
 
   async function scheduleAll() {
     const facts = mine().filter((a) => a.plannedDate && ['a_relire', 'brouillon_wp'].includes(a.status) && a.faitsAVerifier.length).length;
-    if (!confirm('Programmer tous les articles prêts à leur date prévue (9 h) ?')) return;
+    if (!confirm('Programmer tous les articles datés à 10 h le jour choisi ?')) return;
     let acceptFacts = false;
     if (facts) acceptFacts = confirm(`${facts} ${plural(facts, 'article a', 'articles ont')} encore des « faits à vérifier » dans leur liste.\n\nOK : les programmer quand même (vous aurez vérifié les chiffres).\nAnnuler : les laisser de côté pour les relire d'abord.`);
     S.scheduleReport = await api('/articles/schedule-all', 'POST', { acceptFacts });
@@ -432,15 +455,15 @@
     const preview = previewOf(a.htmlContent);
     const wpUrl = safeUrl(a.wpLink);
     const mismatch = !!a.simulated !== demoOn(); // créé dans l'autre mode (démonstration/réel)
-    const reload = async () => { await refresh(); render(); };
+    const reload = async () => { S.seo = {}; await refresh(); render(); };
     const busy = S.regen === a.id;
     const regenBtn = () => el('button', { class: 'btn' + (!c.inRange ? ' primary' : ''), type: 'button', disabled: busy ? true : false, onclick: safe(() => regenerate(a)) }, icon('refresh'), busy ? 'Rédaction en cours...' : 'Régénérer');
     const editBtn = el('button', { class: 'btn', type: 'button', onclick: () => go('edit', a.id) }, icon('file'), 'Modifier');
 
-    // Programmer : une date, une heure (9 h par défaut), un bouton.
+    // Programmer : une date, une heure (10 h par défaut), un bouton.
     const scheduleBlock = (label) => {
       const d = el('input', { type: 'date', id: 'sc-date', min: plusDays(todayParis(), 0), 'aria-label': 'Date de publication' });
-      const t = el('input', { type: 'time', id: 'sc-time', value: '09:00', 'aria-label': 'Heure de publication (heure de Paris)' });
+      const t = el('input', { type: 'time', id: 'sc-time', value: '10:00', 'aria-label': 'Heure de publication (heure de Paris)' });
       d.value = a.status === 'programme' && a.scheduledAt ? new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris' }).format(new Date(a.scheduledAt)) : (a.plannedDate && a.plannedDate > todayParis() ? a.plannedDate : plusDays(todayParis(), 1));
       return el('div', { class: 'sched' }, el('h3', {}, label),
         el('div', { class: 'row' }, d, t),
@@ -455,7 +478,7 @@
       const chk = el('input', { type: 'checkbox', id: 'validated' });
       const pub = el('button', { class: 'btn', type: 'button', disabled: true, onclick: safe(async () => { const r = await confirmed(`/articles/${a.id}/publish`, { validated: true }); if (r) { toast('Article publié sur votre site.'); await reload(); } }) }, icon('check'), 'Publier maintenant');
       chk.addEventListener('change', () => { pub.disabled = !chk.checked; });
-      return el('div', { class: 'sched' }, el('h3', {}, 'Ou publier tout de suite'), el('label', { class: 'check', for: 'validated' }, chk, el('span', {}, 'J\'ai relu et validé cet article')), el('div', { class: 'actions' }, pub));
+      return el('div', { class: 'sched' }, el('h3', {}, a.status === 'a_relire' ? 'Ou publier directement' : 'Ou publier tout de suite'), el('label', { class: 'check', for: 'validated' }, chk, el('span', {}, 'J\'ai relu et validé cet article')), el('div', { class: 'actions' }, pub));
     };
 
     const actions = el('div', { class: 'card sticky' });
@@ -463,9 +486,9 @@
       add(actions, el('div', { class: 'alert' }, `Cet article a été créé en mode ${a.simulated ? 'démonstration' : 'réel'}. Pour le modifier sur le site, repassez en mode ${a.simulated ? 'démonstration' : 'réel'} (Réglages, Connexions).`));
     } else if (a.status === 'a_relire') {
       add(actions, el('div', { class: 'eyebrow' }, 'Étape suivante'), el('h2', {}, 'Cet article est en attente'),
-        el('p', { class: 'muted small' }, 'Il n\'est pas encore sur votre site. Relisez-le, puis choisissez :'),
+        el('p', { class: 'muted small' }, 'Il n\'est pas encore sur votre site. Relisez-le, puis choisissez : brouillon (invisible du public), programmation, ou publication directe.'),
         el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { const r = await confirmed(`/articles/${a.id}/send`, {}); if (r) { toast('Brouillon créé sur votre site (invisible du public).'); await reload(); } }) }, icon('send'), 'Envoyer en brouillon sur le site')),
-        scheduleBlock('Programmer la publication'));
+        scheduleBlock('Ou programmer la publication (10 h par défaut)'), publishNow());
     } else if (a.status === 'brouillon_wp') {
       add(actions, el('div', { class: 'eyebrow' }, 'Dernière étape'), el('h2', {}, 'Brouillon sur votre site'),
         el('p', { class: 'muted small' }, 'Il est sur votre site mais invisible du public. Vous pouvez encore le modifier ici ou dans WordPress.'),
@@ -507,6 +530,22 @@
     else if (c.inRange) add(checks, el('p', { class: 'muted' }, 'Rien à signaler. Relisez quand même chaque phrase.'));
     if (a.faitsAVerifier.length) add(checks, el('h3', {}, 'Faits à vérifier'), el('ul', { class: 'tasks' }, a.faitsAVerifier.map((f) => el('li', {}, f))));
 
+    // Contrôle SEO : ce que contient réellement le site (relu après chaque envoi), en rouge ce qui manque
+    S.seo = S.seo || {};
+    const seoBox = el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Contrôle SEO'),
+      el('button', { class: 'btn', type: 'button', onclick: safe(async () => { delete S.seo[a.id]; render(); }) }, icon('refresh'), 'Relire')));
+    const R = S.seo[a.id];
+    if (!R) {
+      add(seoBox, el('p', { class: 'muted small' }, 'Lecture en cours...'));
+      api(`/articles/${a.id}/seo`).then((r) => { S.seo[a.id] = r; if (S.view === 'article' && S.articleId === a.id) render(); }).catch((e) => { S.seo[a.id] = { error: e.message }; if (S.view === 'article' && S.articleId === a.id) render(); });
+    } else if (R.error) add(seoBox, el('div', { class: 'alert' }, R.error));
+    else {
+      add(seoBox, el('p', { class: 'muted small' }, R.source === 'site' ? 'Relu sur votre site à l\'instant.' : 'Contrôle du texte ici (pas encore sur le site : les champs Yoast sont vérifiés après l\'envoi).'),
+        R.ok ? el('p', { class: 'ok-text' }, 'Tout est en règle.') : el('p', { class: 'seo-miss' }, `${R.missing} ${plural(R.missing, 'point manque', 'points manquent')} ou ${plural(R.missing, 'est', 'sont')} hors des critères.`),
+        el('ul', { class: 'seo-list' }, R.items.map((i) => el('li', { class: i.ok ? 'ok' : 'ko' },
+          el('span', { class: 'seo-dot' }, icon(i.ok ? 'check' : 'x')), el('div', { class: 'grow' }, el('b', {}, i.label), ' : ', el('span', { class: 'seo-val' }, i.value), i.detail ? el('div', { class: 'muted small' }, i.detail) : null)))));
+    }
+
     // Yoast : ce qui est réellement parti sur le site
     let yoast = null;
     if (a.wpId && !a.simulated) {
@@ -537,7 +576,7 @@
       stepper,
       el('div', { class: 'detail' },
         el('div', { class: 'col' }, el('div', { class: 'card post' }, el('h1', { class: 'post-title' }, a.title), preview)),
-        el('div', { class: 'col side-col' }, actions, planned, checks, yoast, serp, linksCard)),
+        el('div', { class: 'col side-col' }, actions, seoBox, planned, checks, yoast, serp, linksCard)),
     ];
   }
 
@@ -897,6 +936,8 @@
     const wpOk = st.wordpress, keyOk = s.secrets.openrouterKey.set, modelOk = !!S.aiDefaults.activeModel;
     const row = (ok, label, hintTxt, btn) => el('div', { class: 'conn' }, el('span', { class: 'dot-s ' + (ok ? 'ok' : 'nm') }, icon(ok ? 'check' : 'alert')),
       el('div', { class: 'grow' }, el('b', {}, label), el('div', { class: 'muted small' }, hintTxt)), btn || null);
+    const fragile = ['wpAppPassword', 'openrouterKey'].filter((k) => s.secrets[k].source === 'interface').length || (s.wpUser && !st.wpUserFromServer);
+    const keepCard = fragile ? el('div', { class: 'alert' }, el('b', {}, 'Pour ne jamais les ressaisir : '), 'vos identifiants sont enregistrés ici, et l\'hébergement gratuit de Render les efface à chaque redémarrage. Copiez-les une fois dans Render (onglet Environment) : ', el('code', {}, 'WP_USER'), ', ', el('code', {}, 'WP_APP_PASSWORD'), ' et ', el('code', {}, 'OPENROUTER_API_KEY'), '. Le tableau de bord les relit tout seul à chaque démarrage.') : el('div', { class: 'alert ok' }, 'Vos identifiants sont fournis par le serveur (Render) : ils survivent aux redémarrages.');
     const setup = el('div', { class: 'card' }, el('h2', {}, 'Mise en route'), el('p', { class: 'muted' }, 'Quatre points pour passer du mode démonstration à l\'utilisation réelle.'),
       row(wpOk, 'Liaison avec WordPress', wpOk ? 'Identifiant et mot de passe renseignés.' : 'Identifiant et mot de passe d\'application à saisir plus bas.'),
       row(keyOk, 'Clé de rédaction (OpenRouter)', keyOk ? 'Clé renseignée.' : 'À saisir plus bas, dans « Clé de rédaction ».'),
@@ -985,7 +1026,7 @@
       el('div', { class: 'row btn-row' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { if (!ps.value) { toast('Collez d\'abord la clé.', true); return; } await saveSecrets({ pagespeedKey: ps.value }, 'Clé PageSpeed enregistrée.'); render(); }) }, 'Enregistrer'),
         psSec.source === 'interface' ? el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => { await saveSecrets({ pagespeedKey: '' }, 'Clé effacée.'); render(); }) }, 'Effacer la clé') : null));
 
-    return [setup, demoCard, wpCard, yoastCard, keyCard, psCard,
+    return [keepCard, setup, demoCard, wpCard, yoastCard, keyCard, psCard,
       el('p', { class: 'muted small' }, 'Les clés saisies ici sont chiffrées sur le serveur et ne s\'affichent plus jamais. Sur l\'hébergement gratuit sans disque, elles sont effacées à un redémarrage : gardez aussi une copie dans les variables de l\'hébergeur.')];
   }
 
@@ -995,7 +1036,7 @@
     return [
       head('Aide', 'Tout ce qu\'il faut savoir, simplement.'),
       faq('À quoi sert cet outil ?', 'Il rédige des articles de blog pour citylock.fr, vous les laissez relire et corriger, puis WordPress les publie à la date que vous choisissez. Il mesure aussi la santé de votre site pour Google. Rien n\'est publié sans votre accord.'),
-      faq('Les deux façons de rédiger', 'Dans « Rédiger » :', '« Un seul article » : vous choisissez un sujet, l\'article arrive dans « Articles », vous faites ce que vous voulez (le modifier, l\'envoyer en brouillon, le programmer, le supprimer).', '« Plusieurs articles » : vous choisissez le nombre de mois (1 à 6) et d\'articles par mois (1 à 3), l\'outil propose un planning, vous changez les dates ou les sujets si besoin, puis il rédige tout en brouillons. Ensuite, dans « Articles », vous relisez et cliquez sur « Programmer tous les articles prêts ».'),
+      faq('Les deux façons de rédiger', 'Dans « Rédiger » :', '« Un seul article » : vous choisissez un sujet, l\'article arrive dans « Articles », vous faites ce que vous voulez (le modifier, l\'envoyer en brouillon, le programmer, le supprimer).', '« Plusieurs articles » : vous choisissez combien d\'articles (de 1 à 20), vous écrivez le mot-clé de chacun, l\'outil propose une date que vous pouvez changer, puis il rédige tout. Tous les articles arrivent dans « Articles ». Là, un calendrier vous laisse choisir la date de chacun : à 10 h ce jour-là, WordPress le publie tout seul.'),
       faq('Où est le prompt de rédaction ?', 'Dans « Réglages », onglet « Rédaction ». C\'est le seul texte envoyé à l\'IA (avec le sujet et la ville) : vous pouvez tout y changer, y compris la longueur demandée et le format de réponse. L\'outil n\'ajoute rien en cachette. Si vous supprimez la partie « format de réponse (JSON) », un avertissement apparaît, car l\'outil ne pourrait plus lire l\'article.'),
       faq('Que veut dire « programmer » ?', 'Vous choisissez une date et une heure : WordPress publie alors l\'article tout seul à ce moment (heure de Paris), même si cet outil est fermé. Vous pouvez annuler la programmation, changer la date, ou publier tout de suite.', 'Pour que WordPress publie à l\'heure exacte, il faut que le site soit visité ou qu\'une tâche planifiée tourne (c\'est le cas de presque tous les sites). Si un article reste « programmé » après sa date, regardez dans WordPress.'),
       faq('Que veut dire « brouillon » ?', 'Un brouillon est un article enregistré sur votre site mais invisible du public. Vous pouvez le modifier tant que vous ne l\'avez pas publié.'),
