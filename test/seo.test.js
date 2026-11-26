@@ -215,3 +215,27 @@ test('texte autour du JSON : l\'article est quand même lu ; erreur inattendue e
     assert.strictEqual(out.title, 'Titre');
   } finally { Object.assign(process.env, saved); delete process.env.OPENROUTER_BASE_URL; srv.close(); }
 });
+
+test('bilan du mois et retour en brouillon d\'un article publié (faux WordPress)', async () => {
+  const r = await setupReal(server);
+  const { call, fake, store } = r;
+  try {
+    const m0 = (await call('GET', '/api/month')).json;
+    assert.strictEqual(m0.published, 0);
+    const pub = r.add(r.make({ keyword: 'alarme maison', htmlContent: good('alarme maison') + bodyWords(750) }));
+    const p = await call('POST', `/api/articles/${pub.id}/publish`, { validated: true });
+    assert.strictEqual(p.status, 200, JSON.stringify(p.json));
+    const m1 = (await call('GET', '/api/month')).json;
+    assert.strictEqual(m1.published, 1, 'publié ce mois-ci compté');
+    // refusé sans confirmation, puis remis en brouillon sur le site
+    assert.strictEqual((await call('POST', `/api/articles/${pub.id}/unpublish`, {})).status, 400);
+    const back = await call('POST', `/api/articles/${pub.id}/unpublish`, { confirmed: true });
+    assert.strictEqual(back.status, 200, JSON.stringify(back.json));
+    assert.strictEqual(back.json.status, 'brouillon_wp');
+    assert.strictEqual(fake.wpPosts.get(p.json.wpId).status, 'draft', 'le site repasse en brouillon');
+    assert.strictEqual((await call('POST', `/api/articles/${pub.id}/unpublish`, { confirmed: true })).status, 409);
+    assert.strictEqual((await call('GET', '/api/month')).json.published, 0);
+    // le journal garde la trace
+    assert.ok((await call('GET', '/api/publications')).json.some((e) => e.kind === 'annulation'));
+  } finally { r.stop(); }
+});

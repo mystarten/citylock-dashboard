@@ -123,8 +123,8 @@
   }
 
   async function refresh() {
-    const [settings, status, articles, audits, aiDefaults, publications] = await Promise.all([api('/settings'), api('/status'), api('/articles'), api('/audits'), api('/ai/defaults'), api('/publications')]);
-    Object.assign(S, { settings, status, articles, audits, aiDefaults, publications });
+    const [settings, status, articles, audits, aiDefaults, publications, month] = await Promise.all([api('/settings'), api('/status'), api('/articles'), api('/audits'), api('/ai/defaults'), api('/publications'), api('/month')]);
+    Object.assign(S, { settings, status, articles, audits, aiDefaults, publications, month });
     S.auditRunning = !!audits.status.running;
     $('sim').classList.toggle('hidden', !status.simulate);
   }
@@ -187,6 +187,13 @@
   // ---------- Accueil ----------
   function viewHome() {
     const s = S.settings, m = mine();
+    const M = S.month;
+    const monthCard = M ? el('div', { class: 'card' }, el('h2', {}, 'Ce mois-ci'),
+      el('div', { class: 'grid3' },
+        el('div', { class: 'stat' }, el('div', { class: 'label' }, 'Publiés'), el('div', { class: 'value' }, M.published)),
+        el('div', { class: 'stat' }, el('div', { class: 'label' }, 'Programmés'), el('div', { class: 'value' }, M.scheduled)),
+        el('div', { class: 'stat' }, el('div', { class: 'label' }, 'À relire'), el('div', { class: 'value' }, M.toReview))),
+      M.next.length ? [el('h3', { class: 'mt' }, 'Prochaines publications'), el('ul', { class: 'versions' }, M.next.map((x) => el('li', {}, el('div', { class: 'grow' }, el('b', {}, x.title), el('div', { class: 'muted small' }, fmtDateTime(x.at))), el('button', { class: 'btn', type: 'button', onclick: () => go('article', x.id) }, 'Ouvrir'))))] : el('p', { class: 'muted small' }, 'Rien de programmé pour le moment.')) : null;
     const toReview = m.filter((a) => a.status === 'a_relire').length;
     const drafts = m.filter((a) => a.status === 'brouillon_wp').length;
     const sched = m.filter((a) => a.status === 'programme').sort((x, y) => x.scheduledAt.localeCompare(y.scheduledAt));
@@ -212,6 +219,7 @@
         el('div', { class: 'card stat' }, el('div', { class: 'label' }, icon('gauge'), 'Score du site'), el('div', { class: 'value' }, latest ? latest.score : '--', el('small', {}, ' / 100')),
           el('div', { class: 'hint' }, latest ? 'Mesuré le ' + fmtDate(latest.date) : 'Pas encore mesuré')),
         el('div', { class: 'card stat' }, el('div', { class: 'label' }, icon('plug'), 'Liaison avec votre site'), el('div', { class: 'value' }, wpPill), el('div', { class: 'hint' }, 'WordPress (citylock.fr)'))),
+      monthCard,
       el('div', { class: 'card next' }, el('div', {}, el('div', { class: 'eyebrow' }, 'Votre prochaine étape'), el('h2', {}, next[0]), el('p', {}, next[1])),
         el('button', { class: 'btn primary big', type: 'button', onclick: safe(next[3]) }, next[2])),
       sched.length ? el('div', { class: 'card' }, el('h2', {}, 'Prochaines publications'), el('ul', { class: 'versions' }, sched.slice(0, 5).map((a) => el('li', {}, el('div', { class: 'grow' }, el('b', {}, a.title), el('div', { class: 'muted small' }, fmtDateTime(a.scheduledAt))), el('button', { class: 'btn', type: 'button', onclick: () => go('article', a.id) }, 'Ouvrir'))))) : null,
@@ -508,7 +516,11 @@
         el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await api(`/articles/${a.id}/unschedule`, 'POST'); toast('Programmation annulée : l\'article redevient un brouillon.'); await reload(); }) }, 'Annuler la programmation')),
         publishNow());
     } else {
-      add(actions, el('div', { class: 'alert ok' }, 'Cet article est publié sur votre site' + (a.publishedBy === 'programmation' ? ' (publié à la date programmée).' : '.')), wpUrl ? el('p', {}, el('a', { class: 'btn', href: wpUrl, target: '_blank', rel: 'noopener noreferrer' }, icon('ext'), 'Voir l\'article')) : null);
+      add(actions, el('div', { class: 'alert ok' }, 'Cet article est publié sur votre site' + (a.publishedBy === 'programmation' ? ' (publié à la date programmée).' : '.')), wpUrl ? el('p', {}, el('a', { class: 'btn', href: wpUrl, target: '_blank', rel: 'noopener noreferrer' }, icon('ext'), 'Voir l\'article')) : null,
+        !a.simulated && !mismatch ? el('div', { class: 'actions' }, el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => {
+          if (!confirm('Remettre cet article en brouillon sur votre site ? Il ne sera plus visible du public. Vous pourrez le republier ensuite.')) return;
+          await api(`/articles/${a.id}/unpublish`, 'POST', { confirmed: true }); toast('Article remis en brouillon sur votre site.'); await reload();
+        }) }, 'Remettre en brouillon')) : null);
     }
     if (a.status !== 'publie') {
       add(actions, el('div', { class: 'actions' }, editBtn, regenBtn()));

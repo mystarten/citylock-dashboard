@@ -292,6 +292,16 @@ async function syncScheduled() {
   }
 }
 
+app.get('/api/month', wrap((req, res) => {
+  // Bilan du mois en cours (heure de Paris) : publiés, programmés, à relire, et les 5 prochaines publications.
+  const month = dates.todayParis().slice(0, 7);
+  const mine = store.getArticles().filter((a) => !!a.simulated === isSimulated());
+  const inMonth = (iso) => iso && new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris' }).format(new Date(iso)).slice(0, 7) === month;
+  const published = mine.filter((a) => a.status === 'publie' && inMonth(a.publishedAt));
+  const next = mine.filter((a) => a.status === 'programme' && a.scheduledAt).sort((x, y) => x.scheduledAt.localeCompare(y.scheduledAt)).slice(0, 5).map((a) => ({ id: a.id, title: a.title, at: a.scheduledAt }));
+  res.json({ month, published: published.length, scheduled: mine.filter((a) => a.status === 'programme').length, toReview: mine.filter((a) => ['a_relire', 'brouillon_wp'].includes(a.status)).length, next });
+}));
+
 app.get('/api/articles', wrap(async (req, res) => { await syncScheduled(); res.json(store.getArticles().map(articleView).reverse()); }));
 
 // Supprime les articles de démonstration (localement seulement : ils n'existent pas vraiment sur le site).
@@ -657,6 +667,19 @@ app.post('/api/articles/:id/publish', wrap(async (req, res) => {
   delete a.scheduledAt;
   saveArticle(a);
   journal.logEvent(a, 'publication', { by: 'manuel' });
+  res.json(articleView(a));
+}));
+
+// Article publié par erreur : on le remet en brouillon sur WordPress (invisible du public, réversible).
+app.post('/api/articles/:id/unpublish', wrap(async (req, res) => {
+  const { a } = findArticle(req.params.id);
+  if (a.status !== 'publie') throw fail(409, 'Cet article n\'est pas publié.');
+  if (!req.body || req.body.confirmed !== true) throw fail(400, 'Confirmez le retour en brouillon.');
+  assertSameMode(a, 'remettre en brouillon');
+  if (!a.simulated) await wp.unschedule(a.wpId);
+  a.status = 'brouillon_wp'; a.publishedAt = undefined; a.publishedBy = undefined; a.unpublishedAt = new Date().toISOString();
+  saveArticle(a);
+  journal.logEvent(a, 'annulation', { by: 'retour en brouillon' });
   res.json(articleView(a));
 }));
 

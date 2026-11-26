@@ -148,6 +148,12 @@ Sur la fiche d'un article (pas encore publié), la carte **Corriger avec l'IA** 
 - L'ancien texte est gardé dans l'historique : **« Annuler cette correction »** le restaure (et met le site à jour si l'article y est déjà).
 - Si l'article est déjà un brouillon ou programmé sur le site, la version du site est mise à jour (confirmation avant d'écraser une modification faite dans WordPress). Une correction compte dans les 40 rédactions par jour.
 
+### Bilan du mois et retour en brouillon
+
+- **Accueil, « Ce mois-ci »** : articles publiés depuis le 1er du mois (heure de Paris), programmés, à relire, et les 5 prochaines publications, avec un bouton pour ouvrir chacune.
+- **Remettre en brouillon** : sur un article publié, le bouton (après confirmation) repasse l'article en brouillon sur WordPress. Il n'est plus visible du public, et tu peux le republier. Le journal garde la trace.
+- **Limite connue** : le bilan est lu dans la liste des articles de l'outil. Sur Render gratuit, cette liste est effacée au redémarrage (voir « Hébergement »).
+
 ### Délai d'attente
 
 Un article peut prendre 1 à 3 minutes avec un modèle qui réfléchit. Le délai d'attente est donc de **5 minutes** (il était de 90 secondes, ce qui provoquait « The operation was aborted due to timeout »). Si OpenRouter dépasse quand même le délai, le message dit « Relancez le sujet » : le sujet est listé avec son erreur, les autres continuent. Ce n'est pas réessayé automatiquement.
