@@ -72,19 +72,19 @@ Si la section est absente : le site doit être en HTTPS, et une extension de sé
 Menu **Rédiger** :
 
 1. **Un seul article** : vous choisissez un sujet (de la liste, ou un mot-clé tapé à la main) et une ville facultative. L'article arrive dans **Articles**, en attente. Vous en faites ce que vous voulez : le relire, le **modifier à la main**, l'envoyer en brouillon sur le site, le **programmer** à une date, le publier tout de suite, le supprimer.
-2. **Plusieurs articles (planning)** : de 1 à 6 mois, avec 1 à 3 articles par mois. L'outil propose un planning (vos sujets dans l'ordre, une date par article : 2 par mois = le jour J puis J+15, 3 par mois = J, J+10, J+20). Vous changez les dates, les mots-clés et les villes, puis vous lancez : tous les articles sont rédigés en arrière-plan, en **brouillons à relire**, avec leur date prévue. **Rien n'est envoyé sur le site à ce stade.** Ensuite, dans **Articles**, le bouton **« Programmer tous les articles prêts »** envoie chaque article sur WordPress avec le statut « programmé » à sa date, à 9 h (heure de Paris) : WordPress le publie tout seul, même si l'outil est fermé.
+2. **Plusieurs articles** : vous choisissez le **nombre d'articles** (1 à 20), la date du premier et l'écart entre deux articles (même jour, tous les jours, 3 jours, semaine, 15 jours, mois). L'outil affiche une ligne par article : une **date** (modifiable), le **mot-clé** et la ville. Les mots-clés de votre liste de sujets sont déjà remplis, vous écrivez les autres. Vous lancez : tous les articles sont rédigés en arrière-plan et rangés dans **Articles**. **Rien n'est envoyé sur le site à ce stade.** Dans **Articles**, le **calendrier de publication** liste chaque article avec un champ date (ouvre un calendrier) et un bouton **« Programmer à 10 h »**, ou **« Programmer les N articles datés »** pour tous d'un coup : WordPress publie chaque article tout seul à **10 h (heure de Paris)** le jour choisi, même si l'outil est fermé.
 
 Si vous avez moins de sujets enregistrés que d'articles demandés, les lignes en trop restent vides : vous tapez le mot-clé vous-même (deux articles sur le même mot-clé se font concurrence sur Google).
 
 ### Programmer, annuler, publier
 
-- **Programmer** : une date et une heure (9 h par défaut, heure de Paris, heure d'été et d'hiver gérées). La date doit être dans le futur (5 minutes minimum, 400 jours maximum).
+- **Programmer** : une date et une heure (10 h par défaut, heure de Paris, heure d'été et d'hiver gérées). La date doit être dans le futur (5 minutes minimum, 400 jours maximum).
 - **Annuler la programmation** : l'article redevient un brouillon sur le site.
 - **Publier maintenant** : demande de cocher « J'ai relu et validé ». Un article programmé garde sa date future dans WordPress : l'outil la ramène à maintenant avant de publier, sinon WordPress le reprogrammerait.
 - Le tableau de bord vérifie (au plus toutes les 2 minutes quand vous consultez la liste, et toutes les heures) que WordPress a bien publié les articles programmés, et le note dans l'**historique des publications**.
 - « Programmer tous les articles prêts » laisse de côté, **avec la raison**, tout article dont la longueur est hors plage, qui contient un mot interdit ou le marqueur `[SOURCE A VERIFIER]`, ou dont le texte a été modifié sur le site depuis l'envoi. Pour les « faits à vérifier » encore listés, une question vous est posée : les programmer quand même (vous avez vérifié) ou les laisser de côté.
 - Un article de démonstration ne touche jamais WordPress ; un vrai article ne peut être ni publié, ni programmé, ni supprimé en mode démonstration.
-- Garde-fous de coût : 1 rédaction toutes les 3 secondes, **40 articles par jour** au maximum (un planning de 18 articles compte pour 18).
+- Garde-fous de coût : 1 rédaction toutes les 3 secondes, **40 articles par jour** au maximum (une liste de 18 articles compte pour 18).
 
 ## Les réglages : deux onglets
 
@@ -95,17 +95,17 @@ Si vous avez moins de sujets enregistrés que d'articles demandés, les lignes e
 
 Le texte envoyé à l'IA est **uniquement** celui de **Réglages, Rédaction, Prompt de rédaction** (c'est le message « système »). Rien n'est caché dans le code : ni longueur, ni format, ni règle. Seul le message « utilisateur » est ajouté par l'outil : nom de l'entreprise, zone, mot-clé, ville, et la liste des pages du site (si un audit a été fait), puis « Rédige l'article. ».
 
-- Le texte d'origine (écrit avec Laurent) est enregistré dans les réglages au premier lancement. Il contient la **longueur** (« entre 600 et 900 mots ») et le **format de réponse JSON** (`title`, `metaTitle`, `metaDescription`, `slug`, `htmlContent`, `internalLinkSuggestions`, `faitsAVerifier`).
+- Le texte d'origine (écrit avec Laurent) est enregistré dans les réglages au premier lancement. Il contient la **longueur** (« Longueur : 700 à 900 mots »), les **critères SEO** (MOTCLE dans le titre, la première phrase, la moitié des intertitres, 6 à 10 fois dans le texte, un lien externe vers Ajax, deux liens internes, mots interdits) et le **format de réponse JSON** (`title`, `focusKeyphrase`, `seoTitle`, `metaDescription`, `slug`, `imageAlt`, `htmlContent`, `internalLinkSuggestions`, `faitsAVerifier`). Le message envoyé avec chaque demande contient « MOTCLE : le mot-clé du sujet » : c'est ce mot que le prompt appelle MOTCLE.
 - **Rétablir le texte d'origine** remet ce texte.
 - Le prompt ne peut pas être vide (80 caractères au minimum, 6000 au maximum). Si vous retirez le mot « JSON » ou les clés `title` / `htmlContent`, ou si aucune longueur n'est demandée, **un avertissement rouge s'affiche** sous le texte, et la rédaction refuse de partir sans « JSON » (OpenRouter renvoie sinon une erreur 400 avec certains modèles).
 - **Il n'y a aucun nouvel essai automatique** si l'IA écrit trop court : l'article est signalé (alerte de longueur) et ne part pas sur le site sans votre confirmation. Vous le régénérez ou vous changez de modèle.
-- **Contrôle de la longueur** (minimum et maximum, 600 et 900 par défaut) : ces deux nombres servent seulement à **vérifier** le résultat. Ils doivent rester cohérents avec ce que le prompt demande.
+- **Contrôle de la longueur** (minimum et maximum, 700 et 900 par défaut) : ces deux nombres servent seulement à **vérifier** le résultat. Ils doivent rester cohérents avec ce que le prompt demande.
 - Sur Render gratuit sans disque, les réglages peuvent être effacés à un redémarrage : gardez une copie de votre prompt. Au redémarrage, le texte d'origine est remis automatiquement.
 - Si vous aviez une ancienne version personnalisée du prompt (sans le format JSON), elle est conservée : l'avertissement vous le dit. Cliquez alors sur « Rétablir le texte d'origine » ou ajoutez la partie format.
 
 ### Changer de modèle d'intelligence artificielle
 
-Réglages, Rédaction, **Modèle** : collez l'identifiant copié depuis openrouter.ai/models (par exemple `anthropic/claude-haiku-5-5`, sans espace), puis **Tester et activer le modèle**. Le modèle n'est utilisé que si un petit test réussit ; sinon l'ancien est conservé et le message donne la raison (identifiant inconnu, clé refusée, crédit épuisé, délai dépassé). Chaque article garde le nom du modèle qui l'a rédigé.
+Réglages, Rédaction, **Modèle** : collez l'identifiant copié depuis openrouter.ai/models (sans espace). **Modèle par défaut : `anthropic/claude-sonnet-5-5`**, utilisé tant que vous n'en avez pas choisi un autre ni défini `OPENROUTER_MODEL` (l'identifiant exact n'a pas pu être vérifié contre OpenRouter depuis l'environnement de développement : le bouton de test le confirme), puis **Tester et activer le modèle**. Le modèle n'est utilisé que si un petit test réussit ; sinon l'ancien est conservé et le message donne la raison (identifiant inconnu, clé refusée, crédit épuisé, délai dépassé). Chaque article garde le nom du modèle qui l'a rédigé.
 
 ### Modifier un article à la main
 
@@ -117,7 +117,7 @@ Le prompt demande des liens internes du type `/choisir-alarme-sans-abonnement/sy
 
 ### Yoast SEO : mot-clé, titre SEO, description
 
-Avant, l'outil n'envoyait à Yoast **ni** mot-clé principal, **ni** titre SEO, **ni** méta description : Yoast était donc rouge partout. Désormais chaque envoi (brouillon, programmation, modification) transmet `_yoast_wpseo_focuskw` (le mot-clé de l'article), `_yoast_wpseo_title` (titre pour Google) et `_yoast_wpseo_metadesc` (description). WordPress n'accepte ces champs par l'API que si un petit extrait de code les déclare. **À installer une fois** (Réglages, Connexions, carte Yoast SEO, bouton « Copier le code ») :
+Avant, l'outil n'envoyait à Yoast **ni** mot-clé principal, **ni** titre SEO, **ni** méta description : Yoast était donc rouge partout. Désormais chaque envoi (brouillon, programmation, modification) transmet `_yoast_wpseo_focuskw` (le mot-clé de l'article), `_yoast_wpseo_title` (titre SEO suivi des variables Yoast `%%sep%% %%sitename%%`) et `_yoast_wpseo_metadesc` (description). WordPress n'accepte ces champs par l'API que si un petit extrait de code les déclare. **À installer une fois** (Réglages, Connexions, carte Yoast SEO, bouton « Copier le code ») :
 
 ```php
 add_action('init', function () {
@@ -137,6 +137,18 @@ add_action('init', function () {
 3. Dans le tableau de bord : **Vérifier**. Pour un article déjà envoyé : Modifier, Enregistrer.
 
 Tant que l'extrait n'est pas installé, les articles partent **sans** erreur mais sans champs Yoast (la carte de l'article le dit). **Ce que cela corrige, et ce que cela ne corrige pas** : les voyants « pas de mot-clé principal » et « pas de méta description » passent ; les autres voyants de Yoast (longueur du texte, mot-clé dans l'introduction et les intertitres, liens sortants, lisibilité) dépendent du texte rédigé par l'IA et ne sont pas garantis.
+
+### Contrôle SEO après l'envoi
+
+Sur chaque article, la carte **Contrôle SEO** relit l'article **sur le site** (adresse, champs Yoast, texte) et affiche, en rouge ce qui manque ou sort des critères : mot-clé principal, titre SEO (50 caractères hors nom du site, commence par le mot-clé), méta description (130 à 155 caractères, contient le mot-clé), slug, nombre de liens internes (2 minimum) et externes (1 attendu), occurrences du mot-clé (6 à 10), mot-clé au début du titre, dans la première phrase, et dans la moitié des H2 (3 à 5 H2). Avant l'envoi, le contrôle porte sur le texte local. Si le site ne renvoie pas les champs Yoast, les trois lignes Yoast sont rouges avec la raison (extrait de code absent). Les images ne sont pas gérées : `imageAlt` est demandé à l'IA et conservé, mais aucune image n'est envoyée.
+
+### Publier directement, ou brouillon
+
+Pour un article pas encore sur le site, la fiche propose : **Envoyer en brouillon**, **Programmer**, ou **Publier directement** (case « J'ai relu et validé ») : l'article est alors créé puis publié sur le site. Mêmes garde-fous que partout : longueur, marqueur `[SOURCE A VERIFIER]`, mode démonstration.
+
+### Ne jamais ressaisir les identifiants
+
+Les identifiants saisis dans l'interface sont chiffrés dans `data/`, et **l'hébergement gratuit de Render efface ce dossier à chaque redémarrage**. Pour ne plus jamais les remettre, copiez-les une fois dans Render, onglet Environment : `WP_USER`, `WP_APP_PASSWORD`, `OPENROUTER_API_KEY`. Ils sont relus à chaque démarrage. L'écran Réglages, Connexions affiche un avertissement tant que ce n'est pas fait. L'outil n'efface jamais une clé de lui-même.
 
 ### Mettre en place WordPress et l'IA (une seule fois)
 
@@ -201,13 +213,14 @@ Vérifié (`npm test` et essais manuels) :
 - Calcul du score sur un jeu de données dont les résultats ont été calculés à la main.
 - Audit complet (sitemap, crawl, liens cassés, orphelines, robots.txt) contre un **faux site local**.
 - Client WordPress contre un **faux serveur WordPress local** (authentification Basic, catégorie Blog sans doublon, brouillon, publication, refus de supprimer un article publié).
-- API : connexion, validation, prompt obligatoire (trop court, vide, trop long), avertissements du prompt, longueurs min/max, un article, planning (limites 1 à 6 mois, 1 à 3 par mois, dates), rédaction du planning en arrière-plan, programmation (date passée ou lointaine refusée, marqueur, longueur, faits à vérifier), annulation, publication, « Programmer tous les articles prêts », suppression, plafond de 40 rédactions par jour.
-- Dates : 9 h à Paris en heure d'hiver et d'été, jour des changements d'heure, fin de mois, planning de 18 articles.
+- API : connexion, validation, prompt obligatoire (trop court, vide, trop long), avertissements du prompt, longueurs min/max, un article, planning (par nombre d'articles de 1 à 20, ou par mois ; dates), rédaction du planning en arrière-plan, programmation (date passée ou lointaine refusée, marqueur, longueur, faits à vérifier), annulation, publication, « Programmer tous les articles prêts », suppression, plafond de 40 rédactions par jour.
+- Dates : 10 h et 9 h à Paris en heure d'hiver et d'été, jour des changements d'heure, fin de mois, planning de 18 articles.
 - Le prompt est envoyé tel quel à l'IA (le message système est identique au texte des réglages, rien d'ajouté), le sujet et la ville partent dans le message utilisateur, le modèle des réglages est utilisé.
 - Longueur des articles : comptage des mots, plage aux bornes, mots interdits (féminin, pluriel, sans faux positif), limite de sortie, réponse coupée détectée, tableaux conservés.
 - Changement de modèle : test avant activation, modèle conservé en cas d'échec, modèle précédent, nom du modèle gardé sur chaque article.
 - Modification manuelle : texte nettoyé, historique et retour arrière, version du site mise à jour, protection contre l'écrasement d'une modification faite dans WordPress, panne du site, régénération.
 - Programmation contre un faux WordPress : statut « future » avec la bonne date (UTC), annulation, publication d'un article programmé (date ramenée à maintenant), suivi d'un article publié par WordPress, refus du marqueur de source, article de démonstration sans effet sur le site.
+- Contrôle SEO (cas bons, chaque défaut en rouge, champs Yoast absents), format JSON étendu, nouveaux mots interdits, publication directe d'un article pas encore envoyé, programmation à 10 h.
 - Yoast : champs envoyés si le site les accepte (envoi, modification, programmation), repli sans erreur sinon, état visible.
 - Liens : un lien du texte écrit `/page/` ou `page/` est conservé ou complété, un lien étranger ou `javascript:` est retiré ; dans l'aperçu, les liens pointent vers le site et s'ouvrent dans un nouvel onglet.
 - Chaque règle de sécurité a été cassée volontairement pour vérifier que les tests la détectent.
