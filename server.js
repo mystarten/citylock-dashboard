@@ -49,7 +49,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const wrap = (fn) => (req, res) => Promise.resolve().then(() => fn(req, res)).catch((e) => {
   log.error(`${req.method} ${req.path}`, e);
-  res.status(e.httpStatus || 500).json({ error: e.httpStatus ? e.message : (e.message || 'Erreur interne.'), ...(e.code ? { code: e.code } : {}) });
+  // Erreur prévue (httpStatus) : son message français part tel quel. Erreur inattendue : message générique, le détail reste dans les journaux.
+  res.status(e.httpStatus || 500).json({ error: e.httpStatus ? e.message : 'Une erreur inattendue est survenue. Réessayez ; si elle revient, le détail est dans les journaux du serveur.', ...(e.code ? { code: e.code } : {}) });
 });
 const fail = (status, message, code) => Object.assign(new Error(message), { httpStatus: status, ...(code ? { code } : {}) });
 

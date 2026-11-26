@@ -52,12 +52,17 @@
   const plural = (n, one, many) => (n > 1 ? many : one);
 
   async function api(path, method = 'GET', body) {
-    const res = await fetch('/api' + path, {
-      method,
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'citylock' },
-      body: body ? JSON.stringify(body) : undefined,
-      credentials: 'same-origin',
-    });
+    let res;
+    try {
+      res = await fetch('/api' + path, {
+        method,
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'citylock' },
+        body: body ? JSON.stringify(body) : undefined,
+        credentials: 'same-origin',
+      });
+    } catch (netErr) {
+      throw new Error('Connexion au tableau de bord perdue. Vérifiez votre réseau, puis réessayez. Si l\'action concernait une rédaction, rien n\'a été perdu : relancez-la.');
+    }
     let data = {};
     try { data = await res.json(); } catch { /* corps vide */ }
     if (res.status === 401 && path !== '/login') { showLogin(); throw new Error('Votre session a expiré. Reconnectez-vous.'); }

@@ -199,3 +199,19 @@ test('délai de génération : 5 minutes, message clair si le délai est dépass
   assert.ok(/const TIMEOUT_MS = 300000;/.test(src), 'le délai doit laisser 5 minutes à un modèle qui réfléchit');
   assert.ok(src.includes('OpenRouter a mis trop de temps à envoyer la réponse'), 'le délai dépassé pendant la lecture de la réponse est nommé clairement');
 });
+
+test('texte autour du JSON : l\'article est quand même lu ; erreur inattendue en français', async () => {
+  const http = require('http');
+  const art = { title: 'Titre', metaTitle: 'M', metaDescription: 'D', slug: 't', htmlContent: bodyWords(750), internalLinkSuggestions: [], faitsAVerifier: [] };
+  const srv = http.createServer((req, res) => {
+    let b = ''; req.on('data', (c) => { b += c; });
+    req.on('end', () => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'Voici votre article :\n```json\n' + JSON.stringify(art) + '\n```\nBonne lecture !' } }] })); });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const saved = { ...process.env };
+  try {
+    Object.assign(process.env, { SIMULATE: 'false', OPENROUTER_BASE_URL: `http://127.0.0.1:${srv.address().port}`, OPENROUTER_API_KEY: 'cle-test-0000' });
+    const out = await ai.generateArticle({ keyword: 'alarme' }, { brandName: 'C', zone: 'Z', aiModel: 'test/m', systemPrompt: require('../lib/defaultRules') }, []);
+    assert.strictEqual(out.title, 'Titre');
+  } finally { Object.assign(process.env, saved); delete process.env.OPENROUTER_BASE_URL; srv.close(); }
+});
