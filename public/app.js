@@ -530,6 +530,39 @@
     else if (c.inRange) add(checks, el('p', { class: 'muted' }, 'Rien à signaler. Relisez quand même chaque phrase.'));
     if (a.faitsAVerifier.length) add(checks, el('h3', {}, 'Faits à vérifier'), el('ul', { class: 'tasks' }, a.faitsAVerifier.map((f) => el('li', {}, f))));
 
+    // Correction par l'IA : on dit quoi changer, l'IA s'en charge, l'ancien texte reste dans l'historique
+    let aiCard = null;
+    if (a.status !== 'publie' && !mismatch) {
+      S.aiRes = S.aiRes || {};
+      const instr = el('textarea', { id: 'ai-instr', rows: 4, maxlength: 2000, placeholder: 'Exemples : « Raccourcis l\'introduction. » · « Dans la section sur les capteurs, explique la différence entre un détecteur d\'ouverture et un détecteur de mouvement. » · « Remplace la dernière phrase par une invitation à appeler. »', 'aria-label': 'Ce qu\'il faut changer' });
+      instr.value = (S.aiDraft && S.aiDraft[a.id]) || '';
+      instr.addEventListener('input', () => { S.aiDraft = S.aiDraft || {}; S.aiDraft[a.id] = instr.value; });
+      const busyAi = S.aiBusy === a.id;
+      const run = el('button', { class: 'btn primary', type: 'button', disabled: busyAi ? true : false, onclick: safe(async () => {
+        if (instr.value.trim().length < 5) { toast('Expliquez d\'abord ce qu\'il faut changer.', true); return; }
+        S.aiBusy = a.id; render();
+        try {
+          let r;
+          try { r = await api(`/articles/${a.id}/ai-edit`, 'POST', { instruction: instr.value }); } catch (e) {
+            if (e.code !== 'wp_changed' || !confirm(e.message)) throw e;
+            r = await api(`/articles/${a.id}/ai-edit`, 'POST', { instruction: instr.value, force: true });
+          }
+          S.aiRes[a.id] = r; S.aiDraft[a.id] = '';
+          toast(r.syncError ? 'Corrigé ici, mais le site n\'a pas pu être mis à jour : ' + r.syncError : 'Article corrigé. L\'ancien texte est gardé dans l\'historique.', !!r.syncError);
+        } finally { S.aiBusy = null; await reload(); }
+      }) }, icon('spark'), busyAi ? 'Correction en cours...' : 'Corriger avec l\'IA');
+      const R = S.aiRes[a.id];
+      aiCard = el('div', { class: 'card' }, el('h2', {}, 'Corriger avec l\'IA'),
+        el('p', { class: 'muted small' }, 'Dites à l\'IA quoi changer et où : elle réécrit l\'article en gardant le SEO (mot-clé, liens, longueur). Votre texte d\'avant est conservé : vous pouvez l\'annuler d\'un clic.'),
+        instr, el('div', { class: 'actions' }, run),
+        busyAi ? el('p', { class: 'muted small' }, 'Cela peut prendre une minute. Ne quittez pas la page.') : null,
+        R ? el('div', { class: 'mt' },
+          el('div', { class: 'alert' + (R.seo.worse.length ? '' : ' ok') },
+            el('b', {}, `Corrigé par ${R.model}. `), `Points SEO hors critères : ${R.seo.before.missing} avant, ${R.seo.after.missing} après.`,
+            R.seo.worse.length ? el('div', {}, 'Attention, la correction a dégradé : ', el('b', {}, R.seo.worse.join(', ')), '. Annulez-la ou corrigez à nouveau.') : null),
+          el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await api(`/articles/${a.id}/revert`, 'POST', {}); S.aiRes[a.id] = null; toast('Correction annulée : version d\'avant restaurée.'); await reload(); }) }, 'Annuler cette correction'))) : null);
+    }
+
     // Contrôle SEO : ce que contient réellement le site (relu après chaque envoi), en rouge ce qui manque
     S.seo = S.seo || {};
     const seoBox = el('div', { class: 'card' }, el('div', { class: 'row-between' }, el('h2', {}, 'Contrôle SEO'),
@@ -576,7 +609,7 @@
       stepper,
       el('div', { class: 'detail' },
         el('div', { class: 'col' }, el('div', { class: 'card post' }, el('h1', { class: 'post-title' }, a.title), preview)),
-        el('div', { class: 'col side-col' }, actions, seoBox, planned, checks, yoast, serp, linksCard)),
+        el('div', { class: 'col side-col' }, actions, aiCard, seoBox, planned, checks, yoast, serp, linksCard)),
     ];
   }
 
@@ -880,6 +913,29 @@
       el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', onclick: safe(async () => { await saveSettings({ minWords: Number(wmin.value), maxWords: Number(wmax.value) }, 'Longueur enregistrée.'); render(); }) }, 'Enregistrer la longueur')),
       el('p', { class: 'muted small' }, 'Sur l\'hébergement gratuit, les réglages peuvent être réinitialisés lors d\'un redémarrage du serveur : gardez une copie de votre prompt.'));
 
+    // Correction par l'IA : modèle (Haiku par défaut) + prompt
+    const eprompt = el('textarea', { id: 'eprompt', rows: 14, maxlength: D.maxLength, class: 'mono', 'aria-label': 'Prompt de correction', spellcheck: 'false' });
+    eprompt.value = s.editPrompt;
+    const ewarn = el('div', {});
+    const eupd = () => { const v = eprompt.value; const pr = []; if (!/json/i.test(v)) pr.push('Le mot « JSON » n\'apparaît pas.'); for (const k of ['title', 'htmlContent']) if (!v.includes(k)) pr.push(`La clé « ${k} » n'apparaît pas dans le format de réponse.`); ewarn.replaceChildren(...(pr.length ? [el('div', { class: 'alert mt' }, el('b', {}, 'À corriger : '), pr.join(' '))] : [])); };
+    eprompt.addEventListener('input', eupd); eupd();
+    const emodel = el('input', { type: 'text', id: 'emodel', maxlength: 99, value: s.editModel || '', placeholder: 'Par défaut : ' + D.activeEditModel, autocomplete: 'off', spellcheck: 'false' });
+    const editCard = el('div', { class: 'card' }, el('h2', {}, 'Correction par l\'IA'),
+      el('p', { class: 'muted' }, 'Sur chaque article, vous pouvez dire à l\'IA quoi changer. Elle utilise son propre modèle (Haiku par défaut, plus rapide et moins cher) et son propre prompt, qui lui demande de garder le SEO.'),
+      el('div', { class: 'model-now' }, 'Correction faite avec : ', el('b', {}, D.activeEditModel)),
+      el('label', { for: 'emodel' }, 'Modèle de correction'), emodel,
+      hint('Vide = Haiku. Le modèle est testé avant d\'être activé.'),
+      el('div', { class: 'row btn-row' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => {
+        setMsg('emodel', 'ko', 'Test en cours (quelques secondes)...'); render();
+        try { const r = await api('/ai/model', 'POST', { model: emodel.value, target: 'edit' }); setMsg('emodel', r.ok ? 'ok' : 'ko', r.message); } catch (e) { setMsg('emodel', 'ko', e.message); }
+        S.settings = await api('/settings'); S.aiDefaults = await api('/ai/defaults'); render();
+      }) }, 'Tester et activer le modèle')), msgBox('emodel'),
+      el('label', { for: 'eprompt' }, 'Prompt de correction'), eprompt, ewarn,
+      el('div', { class: 'row btn-row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveSettings({ editPrompt: eprompt.value }); setMsg('eprompt', 'ok', 'Prompt de correction enregistré.'); render(); }) }, 'Enregistrer le prompt'),
+        el('button', { class: 'btn danger', type: 'button', onclick: safe(async () => { if (!confirm('Remplacer le prompt de correction par le texte d\'origine ?')) return; await saveSettings({ editPrompt: D.editPrompt }); setMsg('eprompt', 'ok', 'Texte d\'origine rétabli.'); render(); }) }, 'Rétablir le texte d\'origine')),
+      msgBox('eprompt'));
+
     // Modèle
     const model = el('input', { type: 'text', id: 'model', maxlength: 99, value: s.aiModel || '', placeholder: D.envModel ? 'Par défaut : ' + D.envModel : 'Exemple : anthropic/claude-haiku-5-5', autocomplete: 'off', spellcheck: 'false' });
     const activate = async (value) => {
@@ -914,7 +970,7 @@
       el('label', { for: 'brand' }, 'Nom commercial'), brand, el('label', { for: 'zone' }, 'Zone desservie'), zone,
       el('div', { class: 'actions' }, el('button', { class: 'btn primary', type: 'button', onclick: safe(async () => { await saveSettings({ brandName: brand.value, zone: zone.value }, 'Informations enregistrées.'); }) }, 'Enregistrer')));
 
-    return [promptCard, modelCard, topicsCard, companyCard];
+    return [promptCard, modelCard, editCard, topicsCard, companyCard];
   }
 
   // Extrait de code à installer une fois dans WordPress pour que Yoast reçoive mot-clé, titre SEO et description.
@@ -1042,6 +1098,7 @@
       faq('Que veut dire « brouillon » ?', 'Un brouillon est un article enregistré sur votre site mais invisible du public. Vous pouvez le modifier tant que vous ne l\'avez pas publié.'),
       faq('Pourquoi un article est-il « laissé de côté » ?', 'Parce qu\'il a un problème qui demande votre œil : longueur hors de la plage, mot interdit, marqueur [SOURCE A VERIFIER] à remplacer, ou faits à vérifier. Ouvrez-le, corrigez-le avec « Modifier », puis programmez-le.'),
       faq('Un article est trop court. Que faire ?', 'Le prompt demande 600 à 900 mots, mais certains modèles écrivent plus court. L\'outil ne réessaie pas tout seul : l\'article est signalé, et il ne part pas sans votre confirmation. Cliquez sur « Régénérer », ou changez de modèle (Réglages, Rédaction).'),
+      faq('Comment faire corriger un article par l\'IA ?', 'Ouvrez l\'article, carte « Corriger avec l\'IA » : écrivez ce qu\'il faut changer et où, puis cliquez sur « Corriger avec l\'IA ». Elle réécrit l\'article en gardant le SEO. Le résultat indique les points SEO hors critères avant et après : si quelque chose s\'est dégradé, c\'est signalé et « Annuler cette correction » remet la version d\'avant. Le modèle (Haiku par défaut) et le prompt de correction se règlent dans Réglages, Rédaction.'),
       faq('Comment modifier un article à la main ?', 'Ouvrez l\'article, puis « Modifier » : titre, texte, description Google, mot-clé principal, faits à vérifier. Le bouton « Insérer un lien » ajoute un lien à l\'endroit du curseur. Chaque enregistrement garde la version d\'avant. Si l\'article est déjà sur le site, il est mis à jour en même temps.'),
       faq('Les liens « alarme avec / sans abonnement » ne s\'ouvraient pas', 'Les liens du texte sont des adresses de votre site (par exemple /choisir-alarme-sans-abonnement/…). Dans l\'aperçu, ils s\'ouvraient par erreur sur ce tableau de bord : c\'est corrigé, ils s\'ouvrent maintenant sur citylock.fr dans un nouvel onglet. La carte « Liens dans le texte » de chaque article les liste pour les tester.'),
       faq('Pourquoi Yoast est-il rouge ?', 'Avant, l\'outil n\'envoyait ni le mot-clé principal, ni le titre SEO, ni la description à Yoast. Désormais il le fait, à condition d\'installer une fois un petit extrait de code dans WordPress (Réglages, Connexions, carte « Yoast SEO »). Les autres voyants (longueur du texte, mot-clé dans l\'introduction, liens…) dépendent du contenu.'),

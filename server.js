@@ -85,7 +85,7 @@ app.get('/api/status', (req, res) => {
 // Ce que le navigateur reçoit : jamais les clés, seulement leur état.
 function publicSettings(s = store.getSettings()) {
   const { secrets: _hidden, ...rest } = s;
-  return { ...rest, wpUser: (s.wpUser || '').trim(), secrets: secrets.status(), promptProblems: ai.promptProblems(s.systemPrompt) };
+  return { ...rest, wpUser: (s.wpUser || '').trim(), secrets: secrets.status(), promptProblems: ai.promptProblems(s.systemPrompt), editPromptProblems: ai.promptProblems(s.editPrompt, ['title', 'htmlContent']) };
 }
 
 const clean = (v, max) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f<>]/g, '').trim().slice(0, max) : '');
@@ -106,6 +106,13 @@ app.put('/api/settings', wrap((req, res) => {
     if (p.length > ai.MAX_RULES_LENGTH) throw fail(400, `Le prompt est trop long (maximum ${ai.MAX_RULES_LENGTH} caractères).`);
     if (p.length < 80) throw fail(400, 'Le prompt est trop court pour être utile (80 caractères minimum). Utilisez « Rétablir le texte d\'origine » pour repartir du texte fourni.');
     s.systemPrompt = p;
+  }
+  if (b.editPrompt !== undefined) {
+    if (typeof b.editPrompt !== 'string') throw fail(400, 'Prompt de correction invalide.');
+    const p = b.editPrompt.replace(/\r\n/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+    if (p.length > ai.MAX_RULES_LENGTH) throw fail(400, `Le prompt de correction est trop long (maximum ${ai.MAX_RULES_LENGTH} caractères).`);
+    if (p.length < 80) throw fail(400, 'Le prompt de correction est trop court (80 caractères minimum). Utilisez « Rétablir le texte d\'origine » pour repartir du texte fourni.');
+    s.editPrompt = p;
   }
   const lim = (v, label) => { if (!Number.isInteger(v) || v < 50 || v > 3000) throw fail(400, `${label} : un nombre entier entre 50 et 3000.`); return v; };
   const minWords = b.minWords !== undefined ? lim(b.minWords, 'Longueur minimale') : s.minWords;
@@ -161,7 +168,7 @@ app.put('/api/secrets', wrap((req, res) => {
 
 app.get('/api/ai/defaults', (req, res) => {
   const set = store.getSettings();
-  res.json({ systemPrompt: ai.DEFAULT_RULES, maxLength: ai.MAX_RULES_LENGTH, minWords: rules.MIN_WORDS, maxWords: rules.MAX_WORDS, envModel: process.env.OPENROUTER_MODEL || '', activeModel: ai.effectiveModel(set), previousModel: set.aiModelPrevious || '' });
+  res.json({ systemPrompt: ai.DEFAULT_RULES, maxLength: ai.MAX_RULES_LENGTH, minWords: rules.MIN_WORDS, maxWords: rules.MAX_WORDS, envModel: process.env.OPENROUTER_MODEL || '', activeModel: ai.effectiveModel(set), previousModel: set.aiModelPrevious || '', editPrompt: ai.DEFAULT_EDIT_RULES, activeEditModel: ai.editModelOf(set) });
 });
 
 let lastAiTest = 0;
@@ -180,19 +187,21 @@ app.post('/api/ai/model', wrap(async (req, res) => {
   const candidate = b.model.trim();
   if (candidate && !ai.MODEL_PATTERN.test(candidate)) throw fail(400, 'Identifiant de modèle invalide. Copiez-le tel quel depuis openrouter.ai/models (exemple : anthropic/claude-haiku-5-5), sans espace.');
   const s = store.getSettings();
-  const current = ai.effectiveModel(s);
+  const forEdit = b.target === 'edit'; // modèle de la correction par l'IA (sinon : modèle de rédaction)
+  const current = forEdit ? ai.editModelOf(s) : ai.effectiveModel(s);
   if (isSimulated()) {
     return res.json({ ok: false, simulated: true, active: current, message: 'Mode démonstration : aucun test réel n\'est fait, le modèle n\'a pas été changé. Désactivez le mode démonstration (Réglages, Connexions) pour tester et activer un modèle.' });
   }
   aiCooldown();
   let tested;
-  try { tested = await ai.testModel(s, candidate); } catch (e) {
+  try { tested = await ai.testModel(s, forEdit && !candidate ? ai.DEFAULT_EDIT_MODEL : candidate); } catch (e) {
     const reason = e.simple || e.message;
     log.warn(`Test du modèle « ${candidate || '(modèle du serveur)'} » échoué : ${reason}`);
     return res.json({ ok: false, active: current, reason, message: `Ce modèle n'a pas répondu : ${reason}. Le modèle actuel est conservé : ${current || 'aucun'}.` });
   }
-  if (candidate !== (s.aiModel || '')) { s.aiModelPrevious = s.aiModel || ''; s.aiModel = candidate; store.saveSettings(s); }
-  log.info(`Modèle activé : ${tested.model}`);
+  if (forEdit) { if (candidate !== (s.editModel || '')) { s.editModel = candidate; store.saveSettings(s); } }
+  else if (candidate !== (s.aiModel || '')) { s.aiModelPrevious = s.aiModel || ''; s.aiModel = candidate; store.saveSettings(s); }
+  log.info(`Modèle ${forEdit ? 'de correction ' : ''}activé : ${tested.model}`);
   res.json({ ok: true, model: tested.model, active: tested.model, message: `Modèle activé : ${tested.model}` });
 }));
 
@@ -464,6 +473,32 @@ app.put('/api/articles/:id', wrap(async (req, res) => {
   const changed = !arts.sameFields(a, fields);
   if (!changed && !a.siteDirty) return res.json({ article: articleView(a), unchanged: true });
   res.json(await commitEdit(list, a, changed ? fields : null, 'Modification manuelle', { force: !!(req.body && req.body.force) }));
+}));
+
+// Correction par l'IA : l'utilisateur dit quoi changer, l'IA renvoie l'article corrigé. L'ancien texte est gardé dans l'historique
+// (retour arrière en un clic) et le contrôle SEO avant/après dit si la correction a dégradé quelque chose.
+const localLive = (a) => ({ slug: a.slug, meta: { _yoast_wpseo_focuskw: a.focusKeyphrase || a.keyword, _yoast_wpseo_title: `${a.metaTitle || a.title} %%sep%% %%sitename%%`, _yoast_wpseo_metadesc: a.metaDescription }, content: a.htmlContent });
+app.post('/api/articles/:id/ai-edit', wrap(async (req, res) => {
+  const { list, a } = findArticle(req.params.id);
+  if (a.status === 'publie') throw fail(409, 'Cet article est publié : modifiez-le directement dans WordPress.');
+  const b = req.body || {};
+  const instruction = typeof b.instruction === 'string' ? b.instruction.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, 2000) : '';
+  if (instruction.length < 5) throw fail(400, 'Expliquez ce qu\'il faut changer (quelques mots au minimum).');
+  const s = store.getSettings();
+  if (!isSimulated() && !secrets.get('openrouterKey')) throw fail(400, 'La clé OpenRouter n\'est pas configurée. Saisissez-la dans Réglages, Connexions.');
+  takeWriteSlot(1);
+  const siteUrl = process.env.WP_BASE_URL || '';
+  const before = seoCheck.analyze(a, localLive(a), siteUrl);
+  const edited = await ai.editArticle(a, instruction, s);
+  // Le mot-clé ne change jamais ; l'adresse de la page non plus si l'article est déjà sur le site (le lien publié ne doit pas casser).
+  const fields = { title: edited.title, metaTitle: edited.metaTitle || a.metaTitle, metaDescription: edited.metaDescription || a.metaDescription, htmlContent: edited.htmlContent, faitsAVerifier: edited.faitsAVerifier };
+  if (!a.wpId) fields.slug = edited.slug || a.slug;
+  a.lastEditModel = edited.modelUsed;
+  const result = await commitEdit(list, a, fields, 'Correction par l\'IA', { force: b.force === true });
+  const after = seoCheck.analyze(a, localLive(a), siteUrl);
+  const summarize = (r) => ({ missing: r.missing, ko: r.items.filter((i) => !i.ok).map((i) => i.label) });
+  const worse = after.items.filter((i, k) => before.items[k].ok && !i.ok).map((i) => i.label);
+  res.json({ ...result, model: edited.modelUsed, seo: { before: summarize(before), after: summarize(after), worse } });
 }));
 
 app.put('/api/articles/:id/planned', wrap((req, res) => {

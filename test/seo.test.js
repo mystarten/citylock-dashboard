@@ -113,3 +113,83 @@ test('contrôle SEO sur le site, publication directe, planning par nombre d\'art
     assert.strictEqual(h, 10);
   } finally { r.stop(); }
 });
+
+test('limite de réponse très large, et message clair si le modèle répond sans texte', async () => {
+  const http = require('http');
+  assert.ok(ai.GENERATION_MAX_TOKENS >= 32000);
+  const seen = [];
+  const srv = http.createServer((req, res) => {
+    let b = ''; req.on('data', (c) => { b += c; });
+    req.on('end', () => { seen.push(JSON.parse(b)); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '' } }] })); });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const saved = { ...process.env };
+  try {
+    Object.assign(process.env, { SIMULATE: 'false', OPENROUTER_BASE_URL: `http://127.0.0.1:${srv.address().port}`, OPENROUTER_API_KEY: 'cle-test-0000' });
+    await assert.rejects(() => ai.generateArticle({ keyword: 'alarme' }, { brandName: 'C', zone: 'Z', aiModel: 'test/sonnet', systemPrompt: require('../lib/defaultRules') }, []), /test\/sonnet.*sans texte.*length.*La clé fonctionne/);
+    assert.ok(seen[0].max_tokens >= 32000);
+  } finally { Object.assign(process.env, saved); process.env.SIMULATE = 'true'; delete process.env.OPENROUTER_BASE_URL; srv.close(); }
+});
+
+test('correction par l\'IA : consigne, modèle Haiku par défaut, historique, retour arrière, SEO avant/après, site mis à jour', async () => {
+  const r = await setupReal(server);
+  const { call, fake, store, orState } = r;
+  try {
+    wp._resetYoast(); fake.state.yoast = true;
+    const a = r.add(r.make({ keyword: 'alarme maison', title: 'Titre initial', slug: 'alarme-maison-guide', htmlContent: good('alarme maison') + bodyWords(750) }));
+    const sent = await call('POST', `/api/articles/${a.id}/send`);
+    assert.strictEqual(sent.status, 200);
+    // consigne trop courte ; clé OpenRouter manquante géré ailleurs
+    assert.strictEqual((await call('POST', `/api/articles/${a.id}/ai-edit`, { instruction: 'x' })).status, 400);
+    assert.strictEqual((await call('POST', '/api/articles/inconnu/ai-edit', { instruction: 'Raccourcis l\'introduction.' })).status, 404);
+
+    const n0 = orState.requests.length;
+    const e = await call('POST', `/api/articles/${a.id}/ai-edit`, { instruction: 'Raccourcis l\'introduction et ajoute une phrase sur les capteurs.' });
+    assert.strictEqual(e.status, 200, JSON.stringify(e.json));
+    const req = orState.requests[n0];
+    assert.strictEqual(req.model, 'anthropic/claude-haiku-5-5');                       // Haiku par défaut pour la correction
+    assert.strictEqual(req.messages[0].content, store.getSettings().editPrompt.trim());  // le prompt de correction des réglages, rien d'ajouté
+    assert.ok(req.messages[1].content.includes('MOTCLE : alarme maison') && req.messages[1].content.includes('Raccourcis l\'introduction') && req.messages[1].content.includes('Titre initial'));
+    assert.ok(req.max_tokens >= 32000);
+    assert.ok(req.messages[0].content.includes('Exactement un lien externe') && req.messages[0].content.includes('MOTCLE apparaît entre 6 et 10 fois'), 'le prompt de correction garde les critères SEO');
+    assert.strictEqual(e.json.model, 'anthropic/claude-haiku-5-5');
+    assert.ok(e.json.article.title.startsWith('Titre généré'));
+    assert.strictEqual(e.json.article.keyword, 'alarme maison');                       // le mot-clé ne change jamais
+    assert.strictEqual(e.json.article.slug, 'alarme-maison-guide');                    // l'adresse d'un article déjà sur le site ne change pas
+    assert.strictEqual(e.json.siteUpdated, true);
+    assert.ok(fake.wpPosts.get(sent.json.wpId).title.startsWith('Titre généré'), 'le site a été mis à jour');
+    assert.ok(Array.isArray(e.json.seo.worse) && typeof e.json.seo.before.missing === 'number' && typeof e.json.seo.after.missing === 'number');
+    assert.ok(e.json.seo.worse.length > 0 || e.json.seo.after.missing >= 0);
+    assert.strictEqual(e.json.article.versionsCount, 1);
+    // retour arrière : l'ancien texte revient (et le site aussi)
+    const back = await call('POST', `/api/articles/${a.id}/revert`, {});
+    assert.strictEqual(back.status, 200, JSON.stringify(back.json));
+    assert.strictEqual(back.json.article.title, 'Titre initial');
+    assert.strictEqual(fake.wpPosts.get(sent.json.wpId).title, 'Titre initial');
+    // article pas encore sur le site : l'adresse proposée par l'IA est appliquée ; article publié : refusé
+    const b = r.add(r.make({ slug: 'ancienne-adresse' }));
+    const eb = await call('POST', `/api/articles/${b.id}/ai-edit`, { instruction: 'Change le titre.' });
+    assert.strictEqual(eb.status, 200);
+    assert.ok(eb.json.article.slug.startsWith('titre-'), eb.json.article.slug);
+    const c = r.add(r.make({ status: 'publie' }));
+    assert.strictEqual((await call('POST', `/api/articles/${c.id}/ai-edit`, { instruction: 'Change le titre.' })).status, 409);
+    // même modèle de test et limite journalière
+    process.env.WRITES_PER_DAY = '1';
+    assert.strictEqual((await call('POST', `/api/articles/${b.id}/ai-edit`, { instruction: 'Change le titre encore.' })).status, 429);
+    delete process.env.WRITES_PER_DAY;
+
+    // réglages : prompt de correction (validation) et modèle de correction (testé avant activation)
+    assert.strictEqual((await call('PUT', '/api/settings', { editPrompt: 'court' })).status, 400);
+    assert.strictEqual((await call('PUT', '/api/settings', { editPrompt: 'x'.repeat(6001) })).status, 400);
+    const ok = await call('PUT', '/api/settings', { editPrompt: 'Prompt de correction personnalisé, répond en JSON avec title et htmlContent. '.repeat(2) });
+    assert.strictEqual(ok.status, 200);
+    assert.deepStrictEqual(ok.json.editPromptProblems, []);
+    assert.strictEqual((await call('PUT', '/api/settings', { editPrompt: 'Prompt sans le format demandé du tout. '.repeat(4) })).json.editPromptProblems.length, 3);
+    const defs = (await call('GET', '/api/ai/defaults')).json;
+    assert.deepStrictEqual([defs.activeEditModel, defs.editPrompt.includes('FORMAT DE RÉPONSE')], ['anthropic/claude-haiku-5-5', true]);
+    await new Promise((x) => setTimeout(x, 2100));
+    const m = await call('POST', '/api/ai/model', { model: 'autre/modele-correction', target: 'edit' });
+    assert.deepStrictEqual([m.json.ok, store.getSettings().editModel, store.getSettings().aiModel], [true, 'autre/modele-correction', 'test/modele']);
+    assert.strictEqual((await call('GET', '/api/ai/defaults')).json.activeEditModel, 'autre/modele-correction');
+  } finally { delete process.env.WRITES_PER_DAY; const st = r.store.getSettings(); st.editModel = ''; r.store.saveSettings(st); r.stop(); }
+});

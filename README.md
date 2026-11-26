@@ -138,6 +138,20 @@ add_action('init', function () {
 
 Tant que l'extrait n'est pas installé, les articles partent **sans** erreur mais sans champs Yoast (la carte de l'article le dit). **Ce que cela corrige, et ce que cela ne corrige pas** : les voyants « pas de mot-clé principal » et « pas de méta description » passent ; les autres voyants de Yoast (longueur du texte, mot-clé dans l'introduction et les intertitres, liens sortants, lisibilité) dépendent du texte rédigé par l'IA et ne sont pas garantis.
 
+### Corriger un article avec l'IA
+
+Sur la fiche d'un article (pas encore publié), la carte **Corriger avec l'IA** : vous écrivez ce qu'il faut changer et où (« raccourcis l'introduction », « ajoute une phrase sur les capteurs dans la section 2 »...), l'IA réécrit l'article et le range à la place de l'ancien. Garde-fous pour le SEO :
+- Elle a **son propre prompt** (Réglages, Rédaction, « Correction par l'IA », modifiable, bouton « Rétablir ») qui lui impose de ne changer que ce qui est demandé et de garder les critères SEO (MOTCLE, 6 à 10 occurrences, 700 à 900 mots, 1 lien externe, 2 liens internes, mots interdits, titre et méta).
+- **Modèle par défaut : `anthropic/claude-haiku-5-5`**, réglable et testé avant activation (Réglages, Rédaction).
+- Le **mot-clé principal ne change jamais**, et l'adresse de la page (slug) d'un article déjà sur le site non plus (le lien ne doit pas casser).
+- Le résultat affiche les **points SEO hors critères avant et après** ; si la correction a dégradé un point, il est nommé en rouge.
+- L'ancien texte est gardé dans l'historique : **« Annuler cette correction »** le restaure (et met le site à jour si l'article y est déjà).
+- Si l'article est déjà un brouillon ou programmé sur le site, la version du site est mise à jour (confirmation avant d'écraser une modification faite dans WordPress). Une correction compte dans les 40 rédactions par jour.
+
+### Limite de réponse du modèle
+
+La limite de réponse envoyée à OpenRouter est de **32 000 jetons** (largement plus qu'un article). Raison : certains modèles (Sonnet) « réfléchissent » avant d'écrire, et cette réflexion consomme la limite ; avec 6 000 jetons ils pouvaient répondre sans aucun texte (« raison d'arrêt : length »). On ne paie que ce qui est réellement généré. Si un modèle répond tout de même sans texte, le message nomme le modèle et la raison d'arrêt.
+
 ### Contrôle SEO après l'envoi
 
 Sur chaque article, la carte **Contrôle SEO** relit l'article **sur le site** (adresse, champs Yoast, texte) et affiche, en rouge ce qui manque ou sort des critères : mot-clé principal, titre SEO (50 caractères hors nom du site, commence par le mot-clé), méta description (130 à 155 caractères, contient le mot-clé), slug, nombre de liens internes (2 minimum) et externes (1 attendu), occurrences du mot-clé (6 à 10), mot-clé au début du titre, dans la première phrase, et dans la moitié des H2 (3 à 5 H2). Avant l'envoi, le contrôle porte sur le texte local. Si le site ne renvoie pas les champs Yoast, les trois lignes Yoast sont rouges avec la raison (extrait de code absent). Les images ne sont pas gérées : `imageAlt` est demandé à l'IA et conservé, mais aucune image n'est envoyée.
@@ -220,6 +234,7 @@ Vérifié (`npm test` et essais manuels) :
 - Changement de modèle : test avant activation, modèle conservé en cas d'échec, modèle précédent, nom du modèle gardé sur chaque article.
 - Modification manuelle : texte nettoyé, historique et retour arrière, version du site mise à jour, protection contre l'écrasement d'une modification faite dans WordPress, panne du site, régénération.
 - Programmation contre un faux WordPress : statut « future » avec la bonne date (UTC), annulation, publication d'un article programmé (date ramenée à maintenant), suivi d'un article publié par WordPress, refus du marqueur de source, article de démonstration sans effet sur le site.
+- Correction par l'IA (consigne, modèle Haiku par défaut, prompt de correction des réglages, mot-clé et adresse conservés, site mis à jour, SEO avant/après, retour arrière, refus d'un article publié), limite de réponse de 32 000 jetons, message clair si le modèle répond sans texte.
 - Contrôle SEO (cas bons, chaque défaut en rouge, champs Yoast absents), format JSON étendu, nouveaux mots interdits, publication directe d'un article pas encore envoyé, programmation à 10 h.
 - Yoast : champs envoyés si le site les accepte (envoi, modification, programmation), repli sans erreur sinon, état visible.
 - Liens : un lien du texte écrit `/page/` ou `page/` est conservé ou complété, un lien étranger ou `javascript:` est retiré ; dans l'aperçu, les liens pointent vers le site et s'ouvrent dans un nouvel onglet.
