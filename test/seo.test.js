@@ -193,3 +193,9 @@ test('correction par l\'IA : consigne, modèle Haiku par défaut, historique, re
     assert.strictEqual((await call('GET', '/api/ai/defaults')).json.activeEditModel, 'autre/modele-correction');
   } finally { delete process.env.WRITES_PER_DAY; const st = r.store.getSettings(); st.editModel = ''; r.store.saveSettings(st); r.stop(); }
 });
+
+test('délai de génération : 5 minutes, message clair si le délai est dépassé', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'lib', 'ai.js'), 'utf8');
+  assert.ok(/const TIMEOUT_MS = 300000;/.test(src), 'le délai doit laisser 5 minutes à un modèle qui réfléchit');
+  assert.ok(src.includes('OpenRouter a mis trop de temps à envoyer la réponse'), 'le délai dépassé pendant la lecture de la réponse est nommé clairement');
+});

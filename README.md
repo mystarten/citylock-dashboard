@@ -148,6 +148,10 @@ Sur la fiche d'un article (pas encore publié), la carte **Corriger avec l'IA** 
 - L'ancien texte est gardé dans l'historique : **« Annuler cette correction »** le restaure (et met le site à jour si l'article y est déjà).
 - Si l'article est déjà un brouillon ou programmé sur le site, la version du site est mise à jour (confirmation avant d'écraser une modification faite dans WordPress). Une correction compte dans les 40 rédactions par jour.
 
+### Délai d'attente
+
+Un article peut prendre 1 à 3 minutes avec un modèle qui réfléchit. Le délai d'attente est donc de **5 minutes** (il était de 90 secondes, ce qui provoquait « The operation was aborted due to timeout »). Si OpenRouter dépasse quand même le délai, le message dit « Relancez le sujet » : le sujet est listé avec son erreur, les autres continuent. Ce n'est pas réessayé automatiquement.
+
 ### Limite de réponse du modèle
 
 La limite de réponse envoyée à OpenRouter est de **32 000 jetons** (largement plus qu'un article). Raison : certains modèles (Sonnet) « réfléchissent » avant d'écrire, et cette réflexion consomme la limite ; avec 6 000 jetons ils pouvaient répondre sans aucun texte (« raison d'arrêt : length »). On ne paie que ce qui est réellement généré. Si un modèle répond tout de même sans texte, le message nomme le modèle et la raison d'arrêt.
