@@ -27,7 +27,7 @@ function fakeOpenRouter(seen) {
       const code = { 'inconnu/modele': 404, 'cle/refusee': 401, 'credit/epuise': 402, 'trop/de-demandes': 429 }[j.model];
       if (code) { res.statusCode = code; return res.end('{}'); }
       res.setHeader('Content-Type', 'application/json');
-      const art = { title: 'Titre', metaTitle: 'M', metaDescription: 'D', slug: 't', htmlContent: bodyWords(650), internalLinkSuggestions: [], faitsAVerifier: [] };
+      const art = { title: 'Titre', metaTitle: 'M', metaDescription: 'D', slug: 't', htmlContent: bodyWords(750), internalLinkSuggestions: [], faitsAVerifier: [] };
       res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: j.max_tokens === 8 ? 'OK' : JSON.stringify(art) } }] }));
     });
   });
@@ -90,7 +90,8 @@ test('changement de modèle : testé avant activation, modèle actuel conservé 
     delete process.env.OPENROUTER_MODEL;
     await wait();
     const none = (await call('POST', '/api/ai/model', { model: '' })).json;
-    assert.deepStrictEqual([none.ok, none.reason], [false, 'aucun identifiant de modèle n\'est indiqué']);
+    assert.deepStrictEqual([none.ok, none.active], [true, 'anthropic/claude-sonnet-5-5']); // sans modèle du serveur : Sonnet 5.5 par défaut
+    assert.strictEqual(ai.DEFAULT_MODEL, 'anthropic/claude-sonnet-5-5');
     process.env.OPENROUTER_MODEL = 'env/modele';
 
     // 6. format invalide : refusé avant tout appel ; la sauvegarde des réglages ne peut pas contourner le test

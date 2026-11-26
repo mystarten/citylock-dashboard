@@ -90,8 +90,8 @@ test('API : auth, validation, un article, planning, programmation, publication, 
 
     // réglages : le prompt est obligatoire et vient d'ici ; longueurs cohérentes
     const set0 = (await call('GET', '/api/settings')).json;
-    assert.ok(set0.systemPrompt.includes('FORMAT DE RÉPONSE') && set0.systemPrompt.includes('entre 600 et 900 mots'), 'le prompt d\'origine est enregistré dans les réglages au premier lancement');
-    assert.deepStrictEqual([set0.minWords, set0.maxWords, set0.promptProblems], [600, 900, []]);
+    assert.ok(set0.systemPrompt.includes('FORMAT DE RÉPONSE') && set0.systemPrompt.includes('Longueur : 700 à 900 mots'), 'le prompt d\'origine est enregistré dans les réglages au premier lancement');
+    assert.deepStrictEqual([set0.minWords, set0.maxWords, set0.promptProblems], [700, 900, []]);
     assert.strictEqual((await call('PUT', '/api/settings', { zone: '' })).status, 400);
     assert.strictEqual((await call('PUT', '/api/settings', { systemPrompt: 'court' })).status, 400);
     assert.strictEqual((await call('PUT', '/api/settings', { systemPrompt: '' })).status, 400);
@@ -123,7 +123,7 @@ test('API : auth, validation, un article, planning, programmation, publication, 
     const a = one.json.article;
     assert.deepStrictEqual([a.status, a.simulated, a.state.label], ['a_relire', true, 'À vérifier avant publication']);
     assert.ok(a.faitsAVerifier.length && a.htmlContent.includes('[SOURCE A VERIFIER]'));
-    assert.ok(a.check.inRange && a.check.words >= 600, 'article de démonstration dans la plage');
+    assert.ok(a.check.inRange && a.check.words >= 700, 'article de démonstration dans la plage');
 
     // Programmer : refusé tant que la date, la longueur et le marqueur ne sont pas réglés
     assert.strictEqual((await call('POST', `/api/articles/${a.id}/schedule`, {})).status, 400);                               // pas de date
@@ -207,10 +207,10 @@ test('API : auth, validation, un article, planning, programmation, publication, 
     delete process.env.WRITES_PER_DAY;
 
     assert.strictEqual((await call('GET', '/api/wp/test')).json.ok, true);
-    // Aucun secret dans le front
+    // Aucune clé dans le front (les NOMS des variables, affichés comme conseil, ne sont pas des secrets)
     for (const f of ['index.html', 'app.js']) {
       const txt = fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
-      assert.ok(!/OPENROUTER_API_KEY|WP_APP_PASSWORD|sk-or-v1-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{30,}/.test(txt), 'variable ou clé en clair dans ' + f);
+      assert.ok(!/sk-or-v1-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{30,}/.test(txt), 'variable ou clé en clair dans ' + f);
     }
   } finally { Object.assign(process.env, saved); delete process.env.WRITE_COOLDOWN_MS; s.close(); }
 });
@@ -374,7 +374,7 @@ test('mode réel : sujets pris en compte, planning rédigé, programmation sur W
     assert.ok(req0.messages[1].content.includes('Mot-clé principal : alarme sans abonnement') && req0.messages[1].content.includes('Ville ciblée : Chatou'));
     assert.strictEqual(req0.model, 'test/modele');
     assert.strictEqual(req0.messages[0].content, store.getSettings().systemPrompt.trim());
-    assert.ok(one.json.article.check.inRange && one.json.article.check.words === 650);
+    assert.ok(one.json.article.check.inRange && one.json.article.check.words === 750);
     assert.strictEqual(fake.wpPosts.size, 0, 'rien sur le site tant que vous ne l\'avez pas décidé');
 
     // 2. planning de 2 mois, 2 articles par mois : les sujets tournent, les dates sont celles proposées
@@ -397,7 +397,7 @@ test('mode réel : sujets pris en compte, planning rédigé, programmation sur W
     assert.ok(posts.length === 4 && posts.every((p) => p.status === 'future' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$/.test(p.date_gmt)));
     const sched = (await call('GET', '/api/articles')).json.filter((a) => a.status === 'programme');
     assert.strictEqual(sched.length, 4);
-    for (const a of sched) assert.ok(new Date(a.scheduledAt).getUTCHours() >= 7 && new Date(a.scheduledAt).getUTCHours() <= 8, 'publication à 9 h, heure de Paris');
+    for (const a of sched) assert.ok(new Date(a.scheduledAt).getUTCHours() >= 8 && new Date(a.scheduledAt).getUTCHours() <= 9, 'publication à 10 h, heure de Paris');
 
     // 4. WordPress publie tout seul : le tableau de bord s'en aperçoit (sans rien publier lui-même)
     const target = sched[0];
@@ -423,16 +423,16 @@ test('mode réel : sujets pris en compte, planning rédigé, programmation sur W
 
     // 7. article trop court : ni envoi, ni programmation sans confirmation ; pas d'envoi automatique
     const shortOne = await call('POST', '/api/write/one', { keyword: 'article court' });
-    assert.ok(shortOne.json.article.check.words < 600 && shortOne.json.article.check.issues.some((i) => i.code === 'length'));
+    assert.ok(shortOne.json.article.check.words < 700 && shortOne.json.article.check.issues.some((i) => i.code === 'length'));
     const before = fake.wpPosts.size;
     assert.deepStrictEqual([(await call('POST', `/api/articles/${shortOne.json.article.id}/send`)).json.code, fake.wpPosts.size], ['out_of_range', before]);
     assert.strictEqual((await call('POST', `/api/articles/${shortOne.json.article.id}/schedule`, { date: future(5) })).json.code, 'out_of_range');
     assert.strictEqual((await call('POST', `/api/articles/${shortOne.json.article.id}/send`, { confirmOutOfRange: true })).status, 200);
 
     // 8. marqueur de source : refusé même après envoi si le texte du site le contient
-    const markerArt = r.add(r.make({ htmlContent: bodyWords(650) + '<p>Selon [SOURCE A VERIFIER] des cambriolages.</p>' }));
+    const markerArt = r.add(r.make({ htmlContent: bodyWords(750) + '<p>Selon [SOURCE A VERIFIER] des cambriolages.</p>' }));
     assert.strictEqual((await call('POST', `/api/articles/${markerArt.id}/schedule`, { date: future(5) })).json.code, 'marker');
-    assert.strictEqual((await call('PUT', `/api/articles/${markerArt.id}`, { htmlContent: bodyWords(650) })).status, 200);
+    assert.strictEqual((await call('PUT', `/api/articles/${markerArt.id}`, { htmlContent: bodyWords(750) })).status, 200);
     assert.strictEqual((await call('POST', `/api/articles/${markerArt.id}/schedule`, { date: future(5) })).status, 200);
 
     // 9. garde-fous : un article de démonstration ne touche jamais WordPress en mode réel
@@ -473,7 +473,7 @@ test('Yoast : champs envoyés si le site les accepte, repli sans erreur sinon, �
     const b = r.add(r.make({ keyword: 'alarme sans fil', metaTitle: 'Titre SEO', metaDescription: 'Description SEO' }));
     const sentB = await call('POST', `/api/articles/${b.id}/send`);
     assert.strictEqual(sentB.json.yoast, true);
-    assert.deepStrictEqual(fake.wpPosts.get(sentB.json.wpId).meta, { _yoast_wpseo_focuskw: 'alarme sans fil', _yoast_wpseo_title: 'Titre SEO', _yoast_wpseo_metadesc: 'Description SEO' });
+    assert.deepStrictEqual(fake.wpPosts.get(sentB.json.wpId).meta, { _yoast_wpseo_focuskw: 'alarme sans fil', _yoast_wpseo_title: 'Titre SEO %%sep%% %%sitename%%', _yoast_wpseo_metadesc: 'Description SEO' });
     // une modification met aussi Yoast à jour
     await call('PUT', `/api/articles/${b.id}`, { metaDescription: 'Nouvelle description', keyword: 'alarme maison' });
     const m = fake.wpPosts.get(sentB.json.wpId).meta;

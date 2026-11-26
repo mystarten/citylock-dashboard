@@ -19,7 +19,7 @@ async function client(server, { user = 'laurent-test', password = 'mdp-de-test-1
 const bodyWords = (n) => Array.from({ length: Math.ceil(n / 40) }, (_, i) => `<p>${Array.from({ length: Math.min(40, n - i * 40) }, (__, j) => `mot${i * 40 + j}`).join(' ')}</p>`).join('');
 
 // Faux WordPress + faux OpenRouter + mode réel + connexion. À appeler APRÈS avoir défini les variables d'environnement du test.
-// Le faux OpenRouter renvoie un article de 650 mots, ou de 3 mots si le sujet est « article court ».
+// Le faux OpenRouter renvoie un article de 750 mots, ou de 3 mots si le sujet est « article court ».
 async function setupReal(server) {
   const http = require('http');
   const { create } = require('./fake-site');
@@ -33,7 +33,7 @@ async function setupReal(server) {
     req.on('end', () => {
       const j = JSON.parse(b); state.calls += 1; state.requests.push(j);
       const short = /Mot-clé principal : article court/.test((j.messages[1] || {}).content || '');
-      const art = { title: `Titre généré ${state.calls}`, metaTitle: 'M', metaDescription: 'D', slug: `titre-${state.calls}`, htmlContent: short ? '<p>trois petits mots</p>' : bodyWords(650), internalLinkSuggestions: [], faitsAVerifier: [] };
+      const art = { title: `Titre généré ${state.calls}`, metaTitle: 'M', metaDescription: 'D', slug: `titre-${state.calls}`, htmlContent: short ? '<p>trois petits mots</p>' : bodyWords(750), internalLinkSuggestions: [], faitsAVerifier: [] };
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: j.max_tokens === 8 ? 'OK' : JSON.stringify(art) } }] }));
     });
@@ -51,7 +51,7 @@ async function setupReal(server) {
   store.saveSettings(st);
   store.saveArticles([]);
   const make = (extra = {}) => ({ id: 'art-' + Math.random().toString(36).slice(2), topicId: null, keyword: 'alarme maison', city: 'Chatou', month: '2026-11', createdAt: new Date().toISOString(), status: 'a_relire', wpId: null, wpLink: null, simulated: false,
-    title: 'Titre initial', metaTitle: 'M', metaDescription: 'D', slug: 'titre-initial', htmlContent: bodyWords(650), internalLinkSuggestions: [], faitsAVerifier: [], warnings: [], wordCount: 650, versionAt: new Date().toISOString(), versionLabel: 'Texte généré', ...extra });
+    title: 'Titre initial', metaTitle: 'M', metaDescription: 'D', slug: 'titre-initial', htmlContent: bodyWords(750), internalLinkSuggestions: [], faitsAVerifier: [], warnings: [], wordCount: 750, versionAt: new Date().toISOString(), versionLabel: 'Texte généré', ...extra });
   const add = (a) => { store.saveArticles([...store.getArticles(), a]); return a; };
   // Un brouillon réellement présent sur le faux site (envoyé par l'API), puis ajusté pour le scénario.
   const siteDraft = async (extra = {}, { sentDaysAgo = 5, scheduled = true } = {}) => {

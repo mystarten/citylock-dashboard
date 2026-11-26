@@ -21,8 +21,8 @@ test('comptage des mots : les blocs HTML ne se collent pas, les balises en ligne
   assert.strictEqual(rules.countWords('<p>un&nbsp;deux — trois</p>'), 3); // le tiret seul n'est pas un mot
 });
 
-test('longueur : la plage 600 à 900 est respectée aux bornes', () => {
-  for (const [n, ok] of [[126, false], [599, false], [600, true], [750, true], [900, true], [901, false]]) {
+test('longueur : la plage 700 à 900 est respectée aux bornes', () => {
+  for (const [n, ok] of [[126, false], [699, false], [700, true], [750, true], [900, true], [901, false]]) {
     const c = rules.checkArticle({ title: 'T', htmlContent: `<p>${words(n)}</p>`, faitsAVerifier: [] });
     assert.strictEqual(c.inRange, ok, `${n} mots`);
     assert.strictEqual(c.issues.some((i) => i.code === 'length'), !ok);
@@ -41,12 +41,12 @@ test('mots interdits : détectés (féminin, pluriel, 100%), sans faux positifs'
   assert.deepStrictEqual(found('un système sans risque'), ['sans risque']);
   assert.deepStrictEqual(found('garantir la sécurité, un meilleurement, 1100 %, la vie, le risque'), []);
   // le titre et les méta sont contrôlés aussi
-  const c = rules.checkArticle({ title: 'La meilleure alarme', metaTitle: '', metaDescription: '', htmlContent: `<p>${words(650)}</p>`, faitsAVerifier: [] });
+  const c = rules.checkArticle({ title: 'La meilleure alarme', metaTitle: '', metaDescription: '', htmlContent: `<p>${words(750)}</p>`, faitsAVerifier: [] });
   assert.ok(c.issues.some((i) => i.code === 'forbidden') && c.blocking);
 });
 
 test('marqueur de source, faits à vérifier, tirets et flèches', () => {
-  const base = { title: 'T', metaTitle: '', metaDescription: '', htmlContent: `<p>${words(650)}</p>`, faitsAVerifier: [] };
+  const base = { title: 'T', metaTitle: '', metaDescription: '', htmlContent: `<p>${words(750)}</p>`, faitsAVerifier: [] };
   assert.strictEqual(rules.checkArticle(base).blocking, false);
   const m = rules.checkArticle({ ...base, htmlContent: base.htmlContent + '<p>Chiffre [SOURCE A VERIFIER] ici.</p>' });
   assert.ok(m.issues.some((i) => i.code === 'marker') && m.issues.some((i) => i.code === 'marker_no_fact') && m.blocking);
@@ -60,9 +60,9 @@ test('marqueur de source, faits à vérifier, tirets et flèches', () => {
 test('instruction par défaut : texte fourni, moins de 6000 caractères, règles clés, format et longueur dedans', () => {
   assert.ok(DEFAULT_RULES.length < ai.MAX_RULES_LENGTH, `${DEFAULT_RULES.length} caractères`);
   assert.ok(DEFAULT_RULES.startsWith('Tu es rédacteur web pour Citylock, installateur d\'alarmes Ajax sans abonnement à Chatou'));
-  for (const phrase of ['06 56 69 60 05 et 01 39 12 46 60', 'du lundi au vendredi, de 9h30 à 19h30', 'Mots interdits : « meilleur », « leader », « certifié », « garanti », « 100 % », « à vie », « révolutionnaire », « sans risque »',
-    'Longueur : 600 à 900 mots', 'Un bloc « Questions fréquentes »', 'systeme-dalarme-avec-abonnement/', 'Ne vise jamais « alarme sans abonnement » ou « alarme autonome » comme mot-clé principal.',
-    'FORMAT DE RÉPONSE', '"title"', '"htmlContent"', '"faitsAVerifier"', 'entre 600 et 900 mots']) {
+  for (const phrase of ['06 56 69 60 05 et 01 39 12 46 60', 'du lundi au vendredi, de 9h30 à 19h30', 'Mots interdits : meilleur, leader, certifié, garanti, 100 %, à vie, révolutionnaire, sans risque, haut de gamme, performant, fiabilité, spécialiste, efficacement',
+    'Longueur : 700 à 900 mots', 'Un bloc « Questions fréquentes »', 'systeme-dalarme-avec-abonnement/', 'Ne vise jamais « alarme sans abonnement » ni « alarme autonome ».', 'focusKeyphrase', 'seoTitle', 'imageAlt', 'Exactement un lien externe', 'MOTCLE apparaît entre 6 et 10 fois',
+    'FORMAT DE RÉPONSE', '"title"', '"htmlContent"', '"faitsAVerifier"', 'Entre 700 et 900 mots']) {
     assert.ok(DEFAULT_RULES.includes(phrase), 'manque : ' + phrase);
   }
   assert.strictEqual(ai.DEFAULT_RULES, DEFAULT_RULES);

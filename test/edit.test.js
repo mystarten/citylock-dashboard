@@ -32,7 +32,7 @@ test('modification manuelle : champs enregistrés, texte nettoyé, contrôles re
     assert.deepStrictEqual([art.title, art.slug, art.keyword], ['La meilleure alarme', 'mon-adresse-e', 'alarme sans fil']);
     assert.deepStrictEqual(art.faitsAVerifier, ['Un fait à vérifier', 'Un autre fait']);
     assert.ok(!art.htmlContent.includes('<script') && !art.htmlContent.includes('javascript:') && !art.htmlContent.includes('onclick'));
-    assert.ok(art.htmlContent.includes('href="https://exemple.fr/page"') && art.htmlContent.includes('href="/page-interne/"') && !art.htmlContent.includes('target='));
+    assert.ok(art.htmlContent.includes('href="https://exemple.fr/page"') && art.htmlContent.includes('href="/page-interne/"') && art.htmlContent.includes('href="https://exemple.fr/page" target="_blank" rel="noopener noreferrer"') && !art.htmlContent.includes('onclick'));
     const codes = art.check.issues.map((i) => i.code);
     for (const c of ['length', 'forbidden', 'marker', 'facts']) assert.ok(codes.includes(c), 'contrôle manquant : ' + c);
     assert.strictEqual(art.state.label, 'À vérifier avant publication');
@@ -81,7 +81,7 @@ test('historique : chaque enregistrement garde la version précédente, retour a
 test('le texte modifié est celui qui part en brouillon, et le brouillon du site suit les modifications', async () => {
   const { fake, call, make, add, stop } = await setup();
   try {
-    const a = add(make({ title: 'Avant', htmlContent: bodyWords(650) }));
+    const a = add(make({ title: 'Avant', htmlContent: bodyWords(750) }));
     await call('PUT', `/api/articles/${a.id}`, { title: 'Titre corrigé', htmlContent: bodyWords(700) + '<p>Phrase ajoutée à la main.</p>' });
     const sent = await call('POST', `/api/articles/${a.id}/send`);
     assert.strictEqual(sent.status, 200);

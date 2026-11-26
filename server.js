@@ -16,6 +16,7 @@ const rules = require('./lib/rules');
 const arts = require('./lib/articles');
 const dates = require('./lib/dates');
 const journal = require('./lib/journal');
+const seoCheck = require('./lib/seoCheck');
 
 // --- Configuration obligatoire ---
 if (!process.env.DASHBOARD_USER || !process.env.DASHBOARD_PASSWORD || !process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 16) {
@@ -73,6 +74,7 @@ app.get('/api/status', (req, res) => {
     simulateFromSettings: typeof set.simulate === 'boolean',
     openrouter: !!(secrets.get('openrouterKey') && ai.effectiveModel(set)),
     wordpress: wp.configured(),
+    wpUserFromServer: !!process.env.WP_USER,
     pagespeed: st.pagespeedKey.set,
     siteUrl: process.env.WP_BASE_URL || '',
     supportContact: process.env.SUPPORT_CONTACT || '',
@@ -341,15 +343,25 @@ app.post('/api/write/preview', wrap((req, res) => {
   res.json({ sent: ai.previewPrompt(resolveTopic(req.body || {}, s), s, lastAuditPages()), problems: ai.promptProblems(s.systemPrompt) });
 }));
 
-// Mode « Plusieurs articles » : propose un planning (sujets de la liste, dans l'ordre, et une date par article).
+// Mode « Plusieurs articles » : propose un planning. Soit `count` articles (1 à 20), espacés de `spacingDays` jours,
+// soit `months` mois à `perMonth` articles par mois. Les sujets de la liste sont pris dans l'ordre.
 app.post('/api/write/plan', wrap((req, res) => {
   const b = req.body || {};
-  const months = Number(b.months), perMonth = Number(b.perMonth);
-  if (!Number.isInteger(months) || months < 1 || months > 6) throw fail(400, 'Le nombre de mois doit être entre 1 et 6.');
-  if (!Number.isInteger(perMonth) || perMonth < 1 || perMonth > 3) throw fail(400, 'Le nombre d\'articles par mois doit être entre 1 et 3.');
   if (!dates.isDate(b.startDate)) throw fail(400, 'Choisissez la date du premier article.');
   if (b.startDate < dates.todayParis()) throw fail(400, 'La date du premier article doit être aujourd\'hui ou plus tard.');
-  const items = dates.buildPlan({ months, perMonth, startDate: b.startDate, topics: store.getSettings().topics });
+  const topics = store.getSettings().topics;
+  let items;
+  if (b.count !== undefined) {
+    const count = Number(b.count), spacing = b.spacingDays === undefined ? 7 : Number(b.spacingDays);
+    if (!Number.isInteger(count) || count < 1 || count > 20) throw fail(400, 'Le nombre d\'articles doit être entre 1 et 20.');
+    if (!Number.isInteger(spacing) || spacing < 0 || spacing > 60) throw fail(400, 'L\'écart entre deux articles doit être entre 0 et 60 jours.');
+    items = dates.buildPlanCount({ count, spacingDays: spacing, startDate: b.startDate, topics });
+  } else {
+    const months = Number(b.months), perMonth = Number(b.perMonth);
+    if (!Number.isInteger(months) || months < 1 || months > 6) throw fail(400, 'Le nombre de mois doit être entre 1 et 6.');
+    if (!Number.isInteger(perMonth) || perMonth < 1 || perMonth > 3) throw fail(400, 'Le nombre d\'articles par mois doit être entre 1 et 3.');
+    items = dates.buildPlan({ months, perMonth, startDate: b.startDate, topics });
+  }
   res.json({ items, missing: items.filter((i) => !i.topicId).length });
 }));
 
@@ -358,7 +370,7 @@ app.post('/api/write/batch', wrap((req, res) => {
   if (batch.running) throw fail(409, 'Une rédaction est déjà en cours.');
   const s = store.getSettings();
   const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
-  if (!items.length || items.length > 18) throw fail(400, 'Le planning doit contenir de 1 à 18 articles.');
+  if (!items.length || items.length > 20) throw fail(400, 'Le planning doit contenir de 1 à 20 articles.');
   const today = dates.todayParis(), limit = dates.addDays(today, 400);
   const todo = items.map((it) => {
     const topic = resolveTopic(it || {}, s);
@@ -392,6 +404,17 @@ app.post('/api/write/batch', wrap((req, res) => {
 app.get('/api/write/status', (req, res) => res.json(batch));
 
 // Doit rester APRÈS les routes fixes de /api/articles/... : « :id » intercepterait leur nom.
+// Contrôle SEO : on relit l'article sur le site (champs Yoast, adresse, texte) ; sans site (démonstration, pas encore envoyé), on contrôle le texte local.
+app.get('/api/articles/:id/seo', wrap(async (req, res) => {
+  const { a } = findArticle(req.params.id);
+  const siteUrl = process.env.WP_BASE_URL || '';
+  const local = { slug: a.slug, meta: { _yoast_wpseo_focuskw: a.focusKeyphrase || a.keyword, _yoast_wpseo_title: `${a.metaTitle || a.title} %%sep%% %%sitename%%`, _yoast_wpseo_metadesc: a.metaDescription }, content: a.htmlContent };
+  if (!a.wpId || a.simulated || isSimulated() || !!a.simulated !== isSimulated()) return res.json({ source: 'local', ...seoCheck.analyze(a, local, siteUrl) });
+  let live;
+  try { live = await wp.readBack(a.wpId); } catch (e) { throw fail(502, 'Impossible de relire l\'article sur le site : ' + e.message); }
+  res.json({ source: 'site', siteStatus: live.status, ...seoCheck.analyze(a, live, siteUrl) });
+}));
+
 app.get('/api/articles/:id', wrap((req, res) => res.json(articleView(findArticle(req.params.id).a))));
 
 // ---------- Modification manuelle, historique, régénération ----------
@@ -483,6 +506,7 @@ app.post('/api/articles/:id/regenerate', wrap(async (req, res) => {
   const art = await ai.generateArticle({ keyword: a.keyword, city: a.city }, s, lastAuditPages());
   a.modelUsed = art.modelUsed;
   a.internalLinkSuggestions = art.internalLinkSuggestions;
+  a.focusKeyphrase = art.focusKeyphrase || a.keyword; a.imageAlt = art.imageAlt;
   const fields = { title: art.title, metaTitle: art.metaTitle, metaDescription: art.metaDescription, slug: art.slug, htmlContent: art.htmlContent, faitsAVerifier: art.faitsAVerifier };
   res.json(await commitEdit(list, a, fields, 'Régénération', { force: !!(req.body && req.body.force) }));
 }));
@@ -511,7 +535,7 @@ const MARKER_MSG = 'Le texte contient encore « [SOURCE A VERIFIER] ». Remplace
 function whenOf(body) {
   const b = body || {};
   if (!dates.isDate(b.date)) throw fail(400, 'Choisissez une date de publication.');
-  const [hh, mm] = /^\d{2}:\d{2}$/.test(b.time || '') ? b.time.split(':').map(Number) : [9, 0];
+  const [hh, mm] = /^\d{2}:\d{2}$/.test(b.time || '') ? b.time.split(':').map(Number) : [10, 0];
   const when = dates.parisToUtc(b.date, hh, mm);
   if (when.getTime() < Date.now() + 5 * 60000) throw fail(400, 'La date de publication doit être dans le futur (au moins 5 minutes).');
   if (when.getTime() > Date.now() + 400 * 86400000) throw fail(400, 'La date de publication est trop lointaine (400 jours au maximum).');
@@ -580,10 +604,16 @@ app.post('/api/articles/:id/unschedule', wrap(async (req, res) => {
 app.post('/api/articles/:id/publish', wrap(async (req, res) => {
   const { a } = findArticle(req.params.id);
   if (!req.body || req.body.validated !== true) throw fail(400, 'Vous devez confirmer « J\'ai relu et validé ».');
-  if (!['brouillon_wp', 'programme'].includes(a.status)) throw fail(409, 'Envoyez d\'abord l\'article en brouillon WordPress.');
+  if (!['a_relire', 'brouillon_wp', 'programme'].includes(a.status)) throw fail(409, 'Cet article est déjà publié.');
   assertSameMode(a, 'publier');
   if (a.siteDirty) throw fail(409, 'Vos dernières modifications ne sont pas encore envoyées sur le site. Ouvrez « Modifier » et enregistrez à nouveau pour réessayer.', 'site_dirty');
   confirmLength(a, req.body);
+  // Publication directe d'un article pas encore envoyé : on le crée d'abord sur le site, puis on le publie.
+  if (a.status === 'a_relire') {
+    if (a.htmlContent.includes(rules.MARKER)) throw fail(409, MARKER_MSG, 'marker');
+    await pushDraft(a);
+    saveArticle(a);
+  }
   // Garde-fou : on relit le texte réellement présent dans WordPress (il a pu être corrigé là-bas).
   if (!isSimulated() && (await wp.getContent(a.wpId)).includes(rules.MARKER)) throw fail(409, MARKER_MSG, 'marker');
   const r = await wp.publish(a.wpId, { resetDate: a.status === 'programme' });
